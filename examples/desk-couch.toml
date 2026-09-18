@@ -1,0 +1,50 @@
+# Two-screen template: an ultrawide at the desk and a 4K TV on the couch.
+#
+# 1. Plug both in. Set the ultrawide the way you like it, then run
+#      battlestation scene capture desk --label Desk
+#    (or use "Save current layout as a scene" in the panel). That fills in the
+#    ultrawide's real desc: identity.
+# 2. Copy the fields below into the captured scenes and add [scene.couch].
+# 3. `battlestation doctor` tells you whether 3840x2160@120 is actually offered.
+#    If the TV's HDMI port is running as 2.0 (no FRL in its EDID), turn on the
+#    TV's enhanced HDMI mode (Samsung: Input Signal Plus) for that port and use
+#    an Ultra High Speed cable. Until then fallback_modes keeps you at 4K@60.
+
+[general]
+default_scene = "desk"
+chord_scenes = ["desk", "couch"]
+keep_seconds = 15
+
+[controller]
+chord = ["BTN_SELECT", "BTN_START"]   # View + Menu
+hold_ms = 1000
+ignore_vendor = ["28de"]
+
+[tv]
+host = "192.168.1.50"
+mac = "aa:bb:cc:dd:ee:ff"
+input_key = "KEY_HDMI2"
+input_fallback = ["KEY_SOURCE", "KEY_RIGHT", "KEY_ENTER"]
+wake_timeout_s = 25
+
+[scene.desk]
+label = "Desk"
+icon = "󰍹"
+disable_unlisted = true
+monitors = [
+  { match = "desc:<your ultrawide's description>", mode = "3440x1440@165", position = "0x0", scale = 1, vrr = 2, hdr = "off" },
+]
+
+[scene.couch]
+label = "Couch"
+icon = "󰠿"
+disable_unlisted = true
+wake_tv = true
+tv_input = true
+steam = "bigpicture"
+on_bigpicture_exit = "ask"   # ask | return | stay
+on_enter = ["omarchy-toggle-idle stay-awake"]
+on_exit = ["omarchy-toggle-idle allow-idle"]
+monitors = [
+  { match = "desc:Samsung Electric Company SAMSUNG 0x01000E00", mode = "3840x2160@120", fallback_modes = ["3840x2160@60"], position = "0x0", scale = 1, vrr = 3, hdr = "auto" },
+]

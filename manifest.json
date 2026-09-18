@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.samueljenkinsml.battlestation",
+  "name": "Battlestation",
+  "version": "0.1.0",
+  "author": "Samuel Jenkins",
+  "license": "MIT",
+  "description": "Gaming HUD for the bar (HDR, VRR, Hz, GPU temp/VRAM, Xbox controller battery, live FPS) plus display scenes that wake the TV and open Steam Big Picture from a controller chord.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Battlestation",
+    "description": "Display, GPU, controller and FPS status with scene switching",
+    "category": "Hardware",
+    "aliases": ["gaming", "gpu", "hdr", "vrr", "fps", "controller", "scenes"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "view": "full",
+      "showDisplay": true,
+      "showGpu": true,
+      "showController": true,
+      "showFps": true,
+      "gpuTempWarn": 80
+    },
+    "schema": [
+      { "key": "view", "type": "enum", "label": "Pill view", "options": ["full", "compact"], "defaultValue": "full" },
+      { "key": "showDisplay", "type": "boolean", "label": "Show display (Hz, HDR, VRR)", "defaultValue": true },
+      { "key": "showGpu", "type": "boolean", "label": "Show GPU temperature and VRAM", "defaultValue": true },
+      { "key": "showController", "type": "boolean", "label": "Show controller battery", "defaultValue": true },
+      { "key": "showFps", "type": "boolean", "label": "Show FPS while a game runs", "defaultValue": true },
+      { "key": "gpuTempWarn", "type": "integer", "label": "GPU temperature warning (°C)", "min": 50, "max": 100, "step": 1, "defaultValue": 80 }
+    ]
+  }
+}

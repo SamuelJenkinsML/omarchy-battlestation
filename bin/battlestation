@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""Battlestation helper CLI. See `battlestation --help`."""
+import os
+import sys
+
+# Never write __pycache__ inside the plugin: the shell watches this directory
+# and hot-reloads the plugin on every file change.
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib"))
+
+from battlestation.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())
