@@ -19,6 +19,7 @@ BarWidget {
   readonly property bool showGpu: setting("showGpu", true) !== false
   readonly property bool showController: setting("showController", true) !== false
   readonly property bool showFps: setting("showFps", true) !== false
+  readonly property bool showStream: setting("showStream", true) !== false
   readonly property int gpuTempWarn: Number(setting("gpuTempWarn", 80))
 
   readonly property color fg: bar ? bar.barForeground : Color.foreground
@@ -77,6 +78,8 @@ BarWidget {
       lines.push(svc.controller.name + "  " + svc.controller.batteryText() + (svc.controller.battery.charging ? " (charging)" : ""))
     if (gameRunning && svc.game.currentGame)
       lines.push(svc.game.currentGame.title + (fps >= 0 ? "  " + Math.round(fps) + " fps" : ""))
+    if (svc.streamEnabled)
+      lines.push(svc.streamAttached ? "Streaming to a client  ·  displays off" : "Streaming ready for Moonlight")
     lines.push("Click: panel  ·  Middle: toggle scene  ·  Right: compact")
     return lines.join("\n")
   }
@@ -158,6 +161,14 @@ BarWidget {
         text: "keep? " + (root.ready ? root.svc.revertRemaining : 0) + "s"
         color: root.urgent
         bold: true
+      }
+
+      // Streaming host: shown only while switched on; accent while a client is attached.
+      Seg {
+        visible: root.showStream && root.ready && root.svc.streamEnabled && !root.pending
+        text: "󰑈"
+        color: root.svc && root.svc.streamAttached ? Color.accent : root.fg
+        opacity: root.svc && (root.svc.streamAttached || root.svc.streamPhase === "armed") ? 1 : 0.5
       }
 
       // Display

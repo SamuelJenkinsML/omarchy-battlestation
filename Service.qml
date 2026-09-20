@@ -18,6 +18,7 @@ Item {
   readonly property string cli: pluginDir + "bin/battlestation"
   readonly property string configPath: Quickshell.env("HOME") + "/.config/battlestation/config.toml"
   readonly property string statePath: Quickshell.env("HOME") + "/.local/state/battlestation/state.json"
+  readonly property string streamStatePath: Quickshell.env("XDG_RUNTIME_DIR") + "/battlestation/stream.json"
 
   // ---- scene state (from `battlestation state`) ----
   property var sceneState: ({})
@@ -36,6 +37,13 @@ Item {
   property int bigPictureReturnId: 0
 
   readonly property var activeSceneInfo: sceneByName(activeScene)
+
+  // ---- streaming host (from the "stream" key of `battlestation state`) ----
+  readonly property var stream: sceneState.stream || ({})
+  readonly property bool streamAvailable: stream.available === true
+  readonly property bool streamEnabled: stream.enabled === true
+  readonly property bool streamAttached: stream.attached === true
+  readonly property string streamPhase: streamProc.running && streamProc.label !== "" ? "working" : (stream.phase || "off")
 
   // ---- live hardware state ----
   readonly property alias gpu: gpuSampler
@@ -94,10 +102,81 @@ Item {
     }
   }
 
+  FileView {
+    path: root.streamStatePath
+    watchChanges: true
+    printErrors: false
+    onFileChanged: stateDebounce.restart()
+  }
+
   Timer {
     id: stateDebounce
     interval: 250
     onTriggered: root.refreshState()
+  }
+
+  // ---- streaming host ----
+  // Its own process, not actionProc: arming runs on every shell start and must
+  // neither trip the busy gate nor raise a toast when there is nothing to arm.
+  Process {
+    id: streamProc
+    property string label: ""   // empty = quiet (arm on start)
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var msg
+        try { msg = JSON.parse(String(text || "").trim().split("\n").pop()) } catch (e) { msg = null }
+        if (msg && !msg.ok && streamProc.label !== "")
+          root.notify("Streaming: " + streamProc.label + " failed", (msg.error || "failed") + "\nRun `battlestation doctor`.", "critical", "󰅚")
+      }
+    }
+    onExited: { streamProc.label = ""; root.refreshState() }
+  }
+
+  function runStream(label, args) {
+    if (streamProc.running) return false
+    streamProc.label = label
+    streamProc.command = [cli, "stream"].concat(args)
+    streamProc.running = true
+    return true
+  }
+
+  function streamToggle() {
+    if (!streamAvailable) {
+      notify("Streaming is not set up", "Run `battlestation setup stream`.", "normal", "󰑈")
+      return
+    }
+    if (streamEnabled) runStream("switching off", ["off"])
+    else runStream("switching on", ["on"])
+  }
+
+  // The panic button: gives the desktop back to the real displays.
+  function streamDetach() {
+    Util.execArgv([cli, "stream", "detach", "--reason", "asked to"])
+    stateDebounce.restart()
+  }
+
+  Process {
+    id: watchdogProc
+    command: [root.cli, "stream", "watchdog"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var msg = JSON.parse(text)
+          if (msg.action === "detach") root.notify("Stream ended", "Displays restored (" + (msg.reason || "client left") + ").", "low", "󰑈")
+          if (msg.action === "detach" || msg.action === "attach") root.refreshState()
+        } catch (e) {}
+      }
+    }
+  }
+
+  // Sunshine skips `undo` when it crashes or the client just vanishes.
+  Timer {
+    interval: 15000
+    repeat: true
+    running: root.streamEnabled
+    onTriggered: if (!watchdogProc.running && !streamProc.running) watchdogProc.running = true
   }
 
   // ---- scene actions ----
@@ -240,7 +319,8 @@ Item {
     id: displayState
     cli: root.cli
     onTopologyChanged: {
-      if (root.sceneState.autoSceneOnHotplug && !root.pendingRevert && !root.busy)
+      // Attaching a stream switches the displays off, which is not a hotplug.
+      if (root.sceneState.autoSceneOnHotplug && !root.pendingRevert && !root.busy && !root.streamAttached)
         root.run("Matching scene", ["scene", "auto"])
     }
   }
@@ -271,7 +351,8 @@ Item {
     cli: root.cli
     onBigPictureOpened: function(address) {
       var info = root.activeSceneInfo
-      if (!info || info.steam !== "bigpicture") return
+      // While streaming the scene stays what it was, but Big Picture is the point.
+      if (!root.streamAttached && (!info || info.steam !== "bigpicture")) return
       // Omarchy floats every class:steam window; Big Picture wants the whole screen.
       Util.execArgv(["hyprctl", "dispatch",
         "hl.dsp.window.fullscreen({ mode = \"fullscreen\", action = \"set\", layout_aware = false, window = \"address:0x" + address + "\" })"])
@@ -322,8 +403,16 @@ Item {
     function revert(): void { root.revert() }
     function tvWake(): void { root.tvWake() }
     function capture(): void { root.captureScene() }
+    function streamToggle(): void { root.streamToggle() }
+    function streamOn(): void { if (!root.streamEnabled) root.streamToggle() }
+    function streamOff(): void { if (root.streamEnabled) root.streamToggle() }
+    function streamDetach(): void { root.streamDetach() }
+    function streamState(): string { return JSON.stringify(root.stream) }
     function refresh(): void { root.refreshState(); displayState.refresh(); displayState.refreshCaps(); gameWatcher.rescan() }
   }
 
-  Component.onCompleted: refreshState()
+  Component.onCompleted: {
+    refreshState()
+    runStream("", ["arm"])  // no-op unless streaming is switched on; never ends a live stream
+  }
 }

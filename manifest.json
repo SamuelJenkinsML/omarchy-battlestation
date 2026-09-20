@@ -27,6 +27,7 @@
       "showGpu": true,
       "showController": true,
       "showFps": true,
+      "showStream": true,
       "gpuTempWarn": 80
     },
     "schema": [
@@ -35,6 +36,7 @@
       { "key": "showGpu", "type": "boolean", "label": "Show GPU temperature and VRAM", "defaultValue": true },
       { "key": "showController", "type": "boolean", "label": "Show controller battery", "defaultValue": true },
       { "key": "showFps", "type": "boolean", "label": "Show FPS while a game runs", "defaultValue": true },
+      { "key": "showStream", "type": "boolean", "label": "Show streaming status when switched on", "defaultValue": true },
       { "key": "gpuTempWarn", "type": "integer", "label": "GPU temperature warning (°C)", "min": 50, "max": 100, "step": 1, "defaultValue": 80 }
     ]
   }

@@ -263,6 +263,55 @@ Panel {
             font.pixelSize: Style.font.caption
           }
 
+          // ---------- Streaming ----------
+          PanelSectionHeader {
+            visible: root.svc !== null && root.svc.streamAvailable
+            text: "STREAMING"
+            foreground: root.fg
+            fontFamily: root.fontFamily
+            width: parent.width
+          }
+          Toggle {
+            visible: root.svc !== null && root.svc.streamAvailable
+            width: parent.width
+            label: "Stream to Moonlight"
+            description: root.streamHint()
+            checked: root.svc !== null && root.svc.streamEnabled
+            foreground: root.fg
+            accent: root.accent
+            fontFamily: root.fontFamily
+            enabled: root.svc !== null && root.svc.streamPhase !== "working"
+            onClicked: root.svc.streamToggle()
+          }
+          Card {
+            visible: root.svc !== null && root.svc.streamAvailable && root.svc.streamEnabled
+            highlight: root.svc && root.svc.streamAttached ? root.accent : "transparent"
+            KV {
+              key: "State"
+              value: root.streamStateText()
+              valueColor: root.svc && root.svc.streamAttached ? root.accent : root.fg
+            }
+            KV {
+              key: "Client"
+              visible: root.svc !== null && root.svc.streamAttached
+              value: root.svc && root.svc.stream.mode ? String(root.svc.stream.mode).replace("x", "×").replace("@", " @ ") + " Hz" : ""
+            }
+            KV {
+              key: "Tailscale"
+              visible: root.svc !== null && !!root.svc.stream.tailscaleIp
+              value: root.svc ? (root.svc.stream.tailscaleIp || "") : ""
+            }
+            Button {
+              visible: root.svc !== null && root.svc.streamAttached
+              text: "Give the desktop back"
+              iconText: "󰍹"
+              foreground: root.fg
+              bordered: true
+              tooltipText: "Turns the displays back on. The client keeps its session but sees an empty desktop."
+              onClicked: root.svc.streamDetach()
+            }
+          }
+
           // ---------- Display ----------
           PanelSectionHeader { text: "DISPLAY"; foreground: root.fg; fontFamily: root.fontFamily; width: parent.width; visible: root.display !== null }
           Card {
@@ -413,6 +462,22 @@ Panel {
         }
       }
     }
+  }
+
+  function streamStateText() {
+    if (!root.svc) return ""
+    var phase = root.svc.streamPhase
+    if (phase === "streaming") return "Streaming · displays off"
+    if (phase === "armed") return "Ready for a client"
+    if (phase === "working" || phase === "arming") return "Starting…"
+    return "Off"
+  }
+
+  function streamHint() {
+    if (!root.svc) return ""
+    if (root.svc.streamAttached) return "Switching off now ends the running stream."
+    if (root.svc.streamEnabled) return "Works with the TV off. Off stops Sunshine and closes its ports."
+    return "Off: no virtual display, Sunshine stopped, nothing listening."
   }
 
   // ---------- small building blocks ----------

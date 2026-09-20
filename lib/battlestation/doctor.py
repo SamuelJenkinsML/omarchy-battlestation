@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import config as config_mod
-from . import controller, drmprops, edid, hypr, mangohud, paths, pad, scenes, tv
+from . import controller, drmprops, edid, fsutil, hypr, mangohud, paths, pad, scenes, stream, sunshine, tv
 
 
 @dataclass
@@ -57,8 +59,11 @@ def run() -> list[Check]:
         drm = drmprops.read()
     except OSError:
         drm = {}
+    virtual = cfg.stream.output if cfg else "BS-STREAM"
     for mon in monitors:
         name = str(mon.get("name"))
+        if name == virtual:
+            continue  # reported under "stream"
         caps = edid.read_caps(name)
         w, h, hz = int(mon.get("width") or 0), int(mon.get("height") or 0), float(mon.get("refreshRate") or 0)
         bits = []
@@ -80,7 +85,7 @@ def run() -> list[Check]:
     if cfg:
         for scene in cfg.scenes.values():
             try:
-                res = scenes.resolve(scene, monitors)
+                res = scenes.resolve(scene, scenes.real_monitors(cfg, monitors))
                 status = "warn" if res.missing or res.notes else "ok"
                 detail = "; ".join(res.notes + [f"not connected: {m}" for m in res.missing]) or "all monitors available"
                 add("scene", status, f"{scene.name}: {detail}")
@@ -138,8 +143,93 @@ def run() -> list[Check]:
     else:
         add("tv", "info", "no [tv] section; TV wake/input switching disabled")
 
+    if cfg:
+        _stream_checks(cfg.stream, monitors, add)
+
     add("steam", "ok" if pkgs["steam"] else "warn", "steam installed" if pkgs["steam"] else "steam not installed")
     return checks
+
+
+def _ufw_allows_streaming() -> bool | None:
+    """None when the rules cannot be read (no ufw, or not world-readable)."""
+    text = fsutil.read_text(Path("/etc/ufw/user.rules"))
+    if text is None:
+        return None
+    return any("47989" in line and line.startswith("### tuple ### allow") for line in text.splitlines())
+
+
+def _stream_checks(st, monitors: list[dict], add) -> None:
+    if not st.configured:
+        add("stream", "info", "no [stream] section; streaming host disabled (see `battlestation setup stream`)")
+        return
+    enabled = stream.is_enabled()
+    add("stream", "info", "switched " + ("on" if enabled else "off") + " (panel switch, or `battlestation stream on|off`)")
+
+    version = sunshine.installed_version()
+    if not version:
+        add("stream", "fail", "sunshine not installed; run `battlestation setup stream` for the steps")
+        return
+    add("stream", "ok" if sunshine.version_ok(version) else "fail",
+        f"sunshine {version}" + ("" if sunshine.version_ok(version) else
+                                 "; needs 2026.914.233613 or newer (virtual-output capture fix and a Linux "
+                                 "security advisory): install lizardbyte/sunshine"))
+
+    unit = stream.unit_state(st.unit)
+    if not unit["loaded"]:
+        add("stream", "fail", f"{st.unit} not found; set stream.unit to your Sunshine user unit")
+    elif unit["enabled"] and st.manage_unit:
+        add("stream", "warn", f"{st.unit} is enabled, so it can start before the virtual display exists and capture "
+            f"the wrong screen: systemctl --user disable {st.unit}")
+    else:
+        add("stream", "ok", "Sunshine unit " + ("running" if unit["active"] else "stopped") + ", started on demand")
+
+    missing = sunshine.missing_keys(st, fsutil.read_text(paths.sunshine_conf()))
+    add("stream", "warn" if missing else "ok",
+        (f"sunshine.conf is missing {', '.join(missing)}: battlestation setup stream --write-config") if missing
+        else "sunshine.conf captures the virtual output and calls attach/detach")
+
+    present = any(m.get("name") == st.output for m in monitors)
+    if enabled:
+        add("stream", "ok" if present else "warn",
+            f"virtual output {st.output} " + ("present" if present else "missing; toggle streaming off and on"))
+    state = stream.load_state()
+    if state.get("attached"):
+        add("stream", "info", f"a client is attached at {state.get('mode')}; the real displays are off until it leaves "
+            "(`battlestation stream detach` gives them back)")
+
+    add("stream", "ok" if os.access("/dev/uinput", os.W_OK) else "fail",
+        "/dev/uinput writable (virtual controllers work)" if os.access("/dev/uinput", os.W_OK)
+        else '/dev/uinput not writable, so the stream would have no input: sudo usermod -aG input "$USER"')
+
+    allowed = _ufw_allows_streaming()
+    if allowed is not None:
+        add("stream", "ok" if allowed else "warn", "firewall allows the streaming ports" if allowed
+            else "ufw has no rule for the streaming ports; see `battlestation setup stream`")
+
+    ip = stream.tailscale_ip()
+    if ip:
+        add("stream", "ok", f"Tailscale up at {ip}; check `tailscale ping <deck>` says 'direct', a relayed link is too slow")
+    else:
+        add("stream", "info", "Tailscale not running: streaming works on the home network only")
+
+    # Things that stop a headless host from being reachable at all.
+    try:
+        with open("/proc/cmdline", encoding="utf-8") as fh:
+            cmdline = fh.read()
+        encrypted = "cryptdevice=" in cmdline or "rd.luks" in cmdline
+    except OSError:
+        encrypted = False
+    if encrypted:
+        add("stream", "info", "encrypted root: after a reboot the machine waits for its passphrase and cannot be "
+            "streamed to until someone types it. Leave it running.")
+    try:
+        proc = subprocess.run(["omarchy-toggle-enabled", "suspend-off"], capture_output=True, timeout=5)
+        if proc.returncode != 0:
+            add("stream", "warn", "Suspend is still in the system menu, and a suspended host is unreachable: omarchy-toggle-suspend")
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if not shutil.which("nvidia-smi"):
+        add("stream", "warn", "nvidia-smi not found: the watchdog cannot tell when a client vanished, only when Sunshine stops")
 
 
 def format_text(checks: list[Check]) -> str:

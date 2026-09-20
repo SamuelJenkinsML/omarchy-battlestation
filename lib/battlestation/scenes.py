@@ -149,8 +149,12 @@ def layout_body(text: str | None) -> str | None:
     return "\n".join(line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("--"))
 
 
-def _write_scene_file(text: str | None) -> None:
-    target = paths.scene_lua()
+def write_overlay(target, text: str | None) -> None:
+    """Write (or with None, remove) one of our generated Hyprland files.
+
+    Hyprland reloads by itself when a file in the toggles directory changes, so
+    the write has to be atomic: a half-written file would be loaded as-is.
+    """
     if text is None:
         try:
             target.unlink()
@@ -160,14 +164,29 @@ def _write_scene_file(text: str | None) -> None:
         fsutil.atomic_write(target, text)
 
 
-def _reload_checked(previous: str | None) -> None:
+def reload_checked(target, previous: str | None, what: str = "scene") -> None:
     hypr.reload()
     time.sleep(0.4)
     errors = [e for e in hypr.config_errors() if "battlestation" in e.lower() or "toggles" in e.lower()]
     if errors:
-        _write_scene_file(previous)
+        write_overlay(target, previous)
         hypr.reload()
-        raise SceneError("Hyprland rejected the scene, rolled back: " + "; ".join(errors))
+        raise SceneError(f"Hyprland rejected the {what}, rolled back: " + "; ".join(errors))
+
+
+def _write_scene_file(text: str | None) -> None:
+    write_overlay(paths.scene_lua(), text)
+
+
+def _reload_checked(previous: str | None) -> None:
+    reload_checked(paths.scene_lua(), previous)
+
+
+def real_monitors(cfg: Config, monitors: list[dict] | None = None) -> list[dict]:
+    """Monitors minus the virtual streaming output, which no scene should ever
+    place, disable or capture: the stream overlay owns it."""
+    monitors = hypr.monitors() if monitors is None else monitors
+    return [m for m in monitors if m.get("name") != cfg.stream.output]
 
 
 def apply(cfg: Config, name: str, confirm: bool = True) -> dict:
@@ -183,7 +202,7 @@ def apply(cfg: Config, name: str, confirm: bool = True) -> dict:
         keep()  # applying a new scene implicitly accepts the one on trial
         state = load_state()
 
-    text, res = render(scene, hypr.monitors())
+    text, res = render(scene, real_monitors(cfg))
     previous_text = fsutil.read_text(paths.scene_lua())
     previous_scene = state.get("active") or ""
     changed = layout_body(previous_text) != layout_body(text)
@@ -298,10 +317,10 @@ def capture_rules(monitors: list[dict], caps_for=edid.read_caps, drm=None) -> li
     return rules
 
 
-def capture_scene(name: str, label: str | None = None, **kw) -> Scene:
+def capture_scene(name: str, label: str | None = None, skip_output: str = "BS-STREAM", **kw) -> Scene:
     from . import drmprops
 
-    monitors = hypr.monitors()
+    monitors = [m for m in hypr.monitors() if m.get("name") != skip_output]
     try:
         drm = drmprops.read()
     except OSError:
