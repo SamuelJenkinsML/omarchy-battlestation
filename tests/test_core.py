@@ -226,6 +226,7 @@ class ApplyTests(unittest.TestCase):
         self.reload = mock.patch("battlestation.hypr.reload").start()
         mock.patch("battlestation.hypr.config_errors", return_value=[]).start()
         mock.patch("battlestation.hypr.monitors", return_value=[TV]).start()
+        self.warp = mock.patch("battlestation.hypr.warp_cursor").start()
         mock.patch("battlestation.edid.read_caps", side_effect=caps_for).start()
         mock.patch("battlestation.scenes.edid.read_caps", side_effect=caps_for).start()
         mock.patch("time.sleep").start()
@@ -250,6 +251,15 @@ class ApplyTests(unittest.TestCase):
         self.assertIsNone(second["pendingRevert"])
         self.assertEqual(self.reload.call_count, calls)
         self.assertEqual(scenes.load_state()["active"], "tv-gaming")
+        # Only the real layout change warped the cursor, to the TV's centre.
+        self.warp.assert_called_once_with(1920, 1080)
+
+    def test_keep_seconds_zero_never_asks(self):
+        cfg = cfg_from(SINGLE.replace("[general]\n", "[general]\nkeep_seconds = 0\n", 1))
+        applied = scenes.apply(cfg, "tv-desktop")
+        self.assertTrue(applied["changed"])
+        self.assertIsNone(applied["pendingRevert"])
+        self.assertNotIn("pendingRevert", scenes.load_state())
 
     def test_revert_restores_absence(self):
         from battlestation import paths
@@ -346,6 +356,43 @@ STREAM_CFG = SINGLE + """
 default_mode = "1280x800@60"
 max_fps = 90
 """
+
+
+class ReclaimTests(unittest.TestCase):
+    """A scene that switches a display off lets Hyprland hand its workspaces to the
+    parked virtual output; they have to come back to a real one."""
+
+    def setUp(self):
+        self.calls = []
+        self.monitors = [dict(UW, focused=False, activeWorkspace={"id": 1}),
+                         dict(HEADLESS, focused=True, activeWorkspace={"id": 2})]
+        mock.patch("battlestation.hypr.monitors", side_effect=lambda **_: self.monitors).start()
+        mock.patch("battlestation.hypr.workspaces", return_value=[
+            {"id": 1, "monitor": "DP-1"}, {"id": 2, "monitor": "BS-STREAM"}, {"id": 99, "monitor": "BS-STREAM"},
+        ]).start()
+        mock.patch("battlestation.hypr.clients", return_value=[
+            {"address": "0xabc", "workspace": {"id": 99}}, {"address": "0xdef", "workspace": {"id": 1}},
+        ]).start()
+        for name in ("focus_workspace", "move_workspace", "move_window"):
+            mock.patch(f"battlestation.hypr.{name}",
+                       side_effect=lambda *a, n=name: self.calls.append((n, *a))).start()
+
+    def tearDown(self):
+        mock.patch.stopall()
+
+    def test_workspaces_and_windows_come_home(self):
+        scenes.reclaim_from_virtual("BS-STREAM")
+        self.assertEqual(self.calls, [
+            ("focus_workspace", 99),          # park the virtual output first so it does not spawn a new one
+            ("move_workspace", 2, "DP-1"),
+            ("move_window", "0xabc", 1),
+            ("focus_workspace", 1),           # focus back on a display you can see
+        ])
+
+    def test_attached_stream_is_left_alone(self):
+        self.monitors = [dict(HEADLESS, focused=True, activeWorkspace={"id": 1})]
+        scenes.reclaim_from_virtual("BS-STREAM")
+        self.assertEqual(self.calls, [])
 
 
 class InstanceTests(unittest.TestCase):

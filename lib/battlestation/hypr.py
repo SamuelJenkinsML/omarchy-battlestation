@@ -102,6 +102,16 @@ def move_window(address: str, workspace: int) -> None:
     dispatch(f'hl.dsp.window.move({{ workspace = "{int(workspace)}", follow = false, window = "address:{address}" }})')
 
 
+def move_workspace(workspace: int, monitor: str) -> None:
+    if not CONNECTOR_RE.match(monitor):
+        raise HyprError(f"unsafe output name {monitor!r}")
+    dispatch(f'hl.dsp.workspace.move({{ workspace = "{int(workspace)}", monitor = {lua_str(monitor)} }})')
+
+
+def warp_cursor(x: int, y: int) -> None:
+    dispatch(f"hl.dsp.cursor.move({{ x = {int(x)}, y = {int(y)} }})")
+
+
 def reload() -> None:
     _run(["reload"])
 

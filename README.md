@@ -39,6 +39,7 @@ Optional extras:
 | Xbox Wireless dongle | AUR `xone-dkms` + `xone-dongle-firmware` |
 | Wake the TV / switch input | add a `[tv]` section, run `battlestation tv pair` and accept the prompt on the TV |
 | Keybind | `o.bind("SUPER + CTRL + G", "Toggle gaming scene", "omarchy-shell io.github.samueljenkinsml.battlestation toggleScene")` in `~/.config/hypr/bindings.lua` |
+| A key per scene | `o.bind("SUPER + CTRL + ALT + 1", "TV only", "omarchy-shell io.github.samueljenkinsml.battlestation scene tv")`, one line per scene. SUPER + CTRL + ALT + number is free in Omarchy |
 
 Then run `battlestation doctor`. It checks every piece and tells you what's missing and how to fix it.
 
@@ -65,7 +66,7 @@ IPC (`omarchy-shell io.github.samueljenkinsml.battlestation <method>`):
 [general]
 default_scene = "tv-desktop"
 chord_scenes = ["tv-desktop", "tv-gaming"]  # what the controller chord toggles
-keep_seconds = 15                            # Keep/Revert window after a layout change
+keep_seconds = 15                            # Keep/Revert window after a layout change; 0 never asks
 auto_scene_on_hotplug = false                # apply the best-matching scene when monitors change
 
 [controller]
