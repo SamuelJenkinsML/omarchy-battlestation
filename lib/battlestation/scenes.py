@@ -174,6 +174,63 @@ def reload_checked(target, previous: str | None, what: str = "scene") -> None:
         raise SceneError(f"Hyprland rejected the {what}, rolled back: " + "; ".join(errors))
 
 
+def reclaim_from_virtual(output: str = "BS-STREAM") -> None:
+    """Take back what Hyprland parked on the virtual stream output.
+
+    When a scene switches a display off, Hyprland moves that display's
+    workspaces (and focus) to another output, and the parked virtual output is
+    as good a candidate as any. Its workspaces then sit 20000 pixels off-screen:
+    SUPER+2 jumps there, the pointer vanishes and new windows open where nobody
+    can see them. Only the parking workspace belongs there, and it stays empty
+    until a client attaches.
+    """
+    try:
+        mons = hypr.monitors(include_disabled=False)
+        virtual = next((m for m in mons if m.get("name") == output), None)
+        real = [m for m in mons if m.get("name") != output]
+        if virtual is None or not real:
+            return  # not streaming-capable, or attached (every real display is off)
+        home = next((m for m in real if m.get("focused")), real[0])
+        home_ws = int((home.get("activeWorkspace") or {}).get("id") or 0)
+        park = luagen.PARK_WORKSPACE
+        if int((virtual.get("activeWorkspace") or {}).get("id") or 0) != park:
+            hypr.focus_workspace(park)  # bound to the virtual output by the stream overlay
+        for ws in hypr.workspaces():
+            wid = int(ws.get("id") or 0)
+            if ws.get("monitor") == output and wid > 0 and wid != park:
+                hypr.move_workspace(wid, str(home["name"]))
+        if home_ws > 0:
+            for client in hypr.clients():
+                if (client.get("workspace") or {}).get("id") == park:
+                    hypr.move_window(str(client.get("address")), home_ws)
+            hypr.focus_workspace(home_ws)
+    except (hypr.HyprError, KeyError, TypeError, ValueError):
+        pass
+
+
+def settle_desktop(output: str = "BS-STREAM") -> None:
+    """After a layout change: nothing stranded off-screen, and a visible pointer."""
+    reclaim_from_virtual(output)
+    recover_cursor(output)
+
+
+def recover_cursor(skip: str = "BS-STREAM") -> None:
+    """Warp the pointer to the middle of the focused output after a layout change.
+
+    On NVIDIA the hardware cursor can stay invisible after a modeset until
+    something warps it (a workspace switch does, via warp_on_change_workspace).
+    """
+    try:
+        mons = [m for m in hypr.monitors(include_disabled=False) if m.get("name") != skip]
+        mon = next((m for m in mons if m.get("focused")), mons[0] if mons else None)
+        if mon:
+            scale = float(mon.get("scale") or 1) or 1
+            hypr.warp_cursor(int(mon["x"] + mon["width"] / scale / 2),
+                             int(mon["y"] + mon["height"] / scale / 2))
+    except (hypr.HyprError, KeyError, TypeError, ValueError):
+        pass
+
+
 def _write_scene_file(text: str | None) -> None:
     write_overlay(paths.scene_lua(), text)
 
@@ -211,6 +268,7 @@ def apply(cfg: Config, name: str, confirm: bool = True) -> dict:
         fsutil.atomic_write(paths.revert_stash(), previous_text if previous_text is not None else "")
         _write_scene_file(text)
         _reload_checked(previous_text)
+        settle_desktop(cfg.stream.output)
 
     state["previous"] = previous_scene if previous_scene != name else state.get("previous", "")
     state["active"] = name
@@ -219,7 +277,7 @@ def apply(cfg: Config, name: str, confirm: bool = True) -> dict:
     }
     state["notes"] = res.notes
     state["appliedAt"] = int(time.time())
-    if changed and confirm:
+    if changed and confirm and cfg.keep_seconds > 0:
         state["pendingRevert"] = {
             "deadline": time.time() + cfg.keep_seconds,
             "seconds": cfg.keep_seconds,
@@ -264,6 +322,8 @@ def revert() -> dict:
     stash = fsutil.read_text(paths.revert_stash())
     _write_scene_file(stash if stash else None)
     hypr.reload()
+    time.sleep(0.4)
+    settle_desktop()
     state["active"] = pending.get("previousScene", "")
     state.pop("layout", None)
     save_state(state)

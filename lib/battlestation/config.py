@@ -249,8 +249,8 @@ def parse(data: dict) -> Config:
 
     general = data.get("general", {}) or {}
     cfg.keep_seconds = int(general.get("keep_seconds", cfg.keep_seconds))
-    if not 5 <= cfg.keep_seconds <= 120:
-        problems.append("general.keep_seconds must be between 5 and 120")
+    if cfg.keep_seconds != 0 and not 5 <= cfg.keep_seconds <= 120:
+        problems.append("general.keep_seconds must be 0 (never ask) or between 5 and 120")
     cfg.auto_scene_on_hotplug = bool(general.get("auto_scene_on_hotplug", False))
 
     ctl = data.get("controller", {}) or {}
