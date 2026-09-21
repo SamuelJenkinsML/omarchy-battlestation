@@ -61,20 +61,23 @@ Item {
     screen: root.screenFor(root.screenName)
     anchors { top: true; left: true }
     margins { top: Style.space(16); left: Style.space(16) }
-    implicitWidth: card.width
-    implicitHeight: card.height
+    implicitWidth: Math.ceil(card.width)
+    implicitHeight: Math.ceil(card.height)
     color: "transparent"
     WlrLayershell.namespace: "battlestation-osd"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
-    exclusionMode: ExclusionMode.Ignore
+    // Normal keeps it below the bar on the desktop; in game the bar is covered anyway.
+    exclusionMode: ExclusionMode.Normal
     mask: Region {}
 
     BorderSurface {
       id: card
       width: card.borderLeft + root.pad + rows.implicitWidth + root.pad + card.borderRight
       height: card.borderTop + root.pad + rows.implicitHeight + root.pad + card.borderBottom
-      color: Util.alpha(Color.background, 0.8)
+      // Opaque: on a colour-managed 10-bit output, even 92% alpha lets game
+      // detail bleed through enough to hurt legibility.
+      color: Color.popups.background
       borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(1)))
       radius: Style.cornerRadius
 
