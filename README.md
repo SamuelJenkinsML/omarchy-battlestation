@@ -33,7 +33,7 @@ Big Picture, and the controller chord toggles between the two.
 Optional extras:
 
 | Want | Do |
-|---|---|
+| --- | --- |
 | Live FPS | `sudo pacman -S mangohud lib32-mangohud`, then `battlestation setup mangohud` and restart Steam |
 | Xbox pad over Bluetooth | `omarchy-install-gaming-xbox-controllers` (xpadneo). This blacklists `xpad`, so wired pads stop working |
 | Xbox Wireless dongle | AUR `xone-dkms` + `xone-dongle-firmware` |
@@ -45,7 +45,7 @@ Then run `battlestation doctor`. It checks every piece and tells you what's miss
 ## Using it
 
 | Where | Action |
-|---|---|
+| --- | --- |
 | Pill: left-click | Open the panel: scenes, Keep/Revert, and display, GPU, controller and game cards |
 | Pill: middle-click | Toggle between the two `chord_scenes` |
 | Pill: right-click | Switch between the compact and full views |
@@ -97,7 +97,7 @@ monitors = [
 Monitor fields:
 
 | Field | Values |
-|---|---|
+| --- | --- |
 | `match` | `desc:<description>` (follows the monitor across ports) or a connector name such as `HDMI-A-1` |
 | `mode` | `WIDTHxHEIGHT@HZ`, `preferred`, `highres` or `highrr`. Checked against what the display offers; `fallback_modes` are tried in order |
 | `vrr` | 0 off, 1 always, 2 fullscreen, 3 fullscreen games and video |
@@ -126,7 +126,7 @@ at <https://localhost:47990>, then flip **Stream to Moonlight** in the panel
 and pair Moonlight with the PIN it shows.
 
 | State | What is true |
-|---|---|
+| --- | --- |
 | **Off** | No virtual display, Sunshine stopped, no ports listening. The default. |
 | **Ready** | Virtual display parked off to the side on workspace 99; Sunshine running. |
 | **Streaming** | A client connected: the virtual display takes the client's resolution, the real displays switch off and your workspaces move over. They move back when it leaves. |
@@ -192,7 +192,7 @@ touches only these paths. With streaming switched on it also starts and stops
 Sunshine's own user unit (`systemctl --user`), which it neither ships nor enables.
 
 | Path | Purpose |
-|---|---|
+| --- | --- |
 | `~/.config/battlestation/config.toml`, `tv-token` (0600), `mangohud.conf` | your config |
 | `~/.local/state/battlestation/` | active scene, Keep/Revert stash |
 | `~/.local/state/omarchy/toggles/hypr/battlestation-scene.lua` | the generated scene |
@@ -221,6 +221,15 @@ make validate  # omarchy-plugin-validate
 make dev       # copy into ~/.config/omarchy/plugins/<id>/ (the shell hot-reloads)
 make logs      # plugin lines from the shell log
 ```
+
+## TODO
+
+Still open on the feature:
+
+- Tailscale for streaming away from home.
+- Three untested disconnect paths: pause and resume, the Deck powering off mid-stream, and connecting while the desktop is locked.
+- Taking Suspend out of the system menu.
+- HDR, once the upstream Sunshine change lands.
 
 ## Credits
 
