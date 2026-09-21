@@ -10,7 +10,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
-from battlestation import config, edid, hypr, luagen, mangohud, pad, scenes, stream, sunshine, ws  # noqa: E402
+from battlestation import config, edid, hypr, luagen, mangohud, pad, scenes, stream, sunshine, tv, ws  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures"
 TV_DESC = "Samsung Electric Company SAMSUNG 0x01000E00"
@@ -88,6 +88,55 @@ monitors = [{{ match = "desc:{UW_DESC}", mode = "3440x1440@165", vrr = 2, hdr = 
 disable_unlisted = true
 monitors = [{{ match = "desc:{TV_DESC}", mode = "3840x2160@120", fallback_modes = ["3840x2160@60"], vrr = 3, hdr = "auto" }}]
 """
+
+
+class TvWakeTests(unittest.TestCase):
+    def setUp(self):
+        self.cfg = config.TvConfig(host="192.168.1.133", mac="28:e6:a9:46:c3:4c")
+        self.now = [1000.0]
+        clock = mock.patch.object(tv.time, "time", side_effect=lambda: self.now[0])
+        sleep = mock.patch.object(tv.time, "sleep", side_effect=lambda s: self.now.__setitem__(0, self.now[0] + s))
+        clock.start(); sleep.start()
+        self.addCleanup(clock.stop); self.addCleanup(sleep.stop)
+
+    def wake(self, states):
+        states = iter(states)
+        with mock.patch.object(tv, "power_state", side_effect=lambda host: next(states, "off")), \
+                mock.patch.object(tv, "send_wol") as send:
+            try:
+                return tv.wake(self.cfg), send
+            except tv.TvError as exc:
+                return exc, send
+
+    def test_targets_cover_broadcast_subnet_and_unicast(self):
+        self.assertEqual(tv.wol_targets(self.cfg), ["255.255.255.255", "192.168.1.133", "192.168.1.255"])
+
+    def test_keeps_resending_while_the_tv_stays_dark(self):
+        # Deep standby: unreachable (reads "off") for several seconds, never "standby".
+        result, send = self.wake(["off"] * 7 + ["on"])
+        self.assertTrue(result["woke"])
+        bursts = send.call_count // len(tv.wol_targets(self.cfg))
+        self.assertGreaterEqual(bursts, 3)
+
+    def test_gives_up_after_timeout(self):
+        result, send = self.wake([])
+        self.assertIsInstance(result, tv.TvError)
+        self.assertLessEqual(self.now[0] - 1000.0, self.cfg.wake_timeout_s + 1.5)
+
+    def test_already_on_sends_nothing(self):
+        result, send = self.wake(["on"])
+        self.assertFalse(result["woke"])
+        send.assert_not_called()
+
+    def test_one_unreachable_target_does_not_abort(self):
+        def flaky(mac, target):
+            if target == "192.168.1.133":
+                raise OSError("no route")
+        with mock.patch.object(tv, "send_wol", side_effect=flaky):
+            tv.send_wol_all(self.cfg)
+        with mock.patch.object(tv, "send_wol", side_effect=OSError("down")):
+            with self.assertRaises(tv.TvError):
+                tv.send_wol_all(self.cfg)
 
 
 class ConfigTests(unittest.TestCase):
