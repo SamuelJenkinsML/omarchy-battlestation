@@ -20,6 +20,7 @@ from .config import TvConfig
 from .ws import WebSocket, WebSocketError
 
 APP_NAME = "Battlestation"
+WOL_RESEND_S = 2.0
 
 
 class TvError(RuntimeError):
@@ -40,6 +41,30 @@ def send_wol(mac: str, broadcast: str = "255.255.255.255", port: int = 9) -> Non
         for _ in range(3):
             sock.sendto(packet, (broadcast, port))
             time.sleep(0.05)
+
+
+def wol_targets(cfg: TvConfig) -> list[str]:
+    """Where to send the magic packet. A TV on Wi-Fi in deep standby dozes its
+    radio, and the access point only delivers broadcasts at DTIM beacons (some
+    routers throttle or drop them), so also unicast to the TV's last address:
+    the AP buffers unicast frames for a sleeping station."""
+    targets = [cfg.broadcast, cfg.host]
+    octets = cfg.host.split(".")
+    if len(octets) == 4 and all(o.isdigit() for o in octets):
+        targets.append(".".join(octets[:3] + ["255"]))  # directed broadcast, assuming a /24
+    return list(dict.fromkeys(t for t in targets if t))
+
+
+def send_wol_all(cfg: TvConfig) -> None:
+    sent = False
+    for target in wol_targets(cfg):
+        try:
+            send_wol(cfg.mac, target)
+            sent = True
+        except OSError:
+            pass  # e.g. no neighbour entry for the unicast target; the broadcasts still go
+    if not sent:
+        raise TvError("could not send the Wake-on-LAN packet on any route")
 
 
 def info(host: str, timeout: float = 2.0) -> dict | None:
@@ -126,23 +151,21 @@ def wake(cfg: TvConfig) -> dict:
     started = time.time()
     if power_state(cfg.host) == "on":
         return {"state": "on", "woke": False, "seconds": 0}
-    if cfg.mac:
-        send_wol(cfg.mac, cfg.broadcast)
-    elif power_state(cfg.host) == "standby":
+    if not cfg.mac:
+        if power_state(cfg.host) != "standby":
+            raise TvError("TV is off and [tv] mac is not set, so Wake-on-LAN is impossible")
         # Network standby without a MAC: the power key over the websocket works.
         send_keys(cfg, ["KEY_POWER"])
-    else:
-        raise TvError("TV is off and [tv] mac is not set, so Wake-on-LAN is impossible")
     deadline = started + cfg.wake_timeout_s
-    resent = False
+    next_send = 0.0
     while time.time() < deadline:
-        state = power_state(cfg.host)
-        if state == "on":
+        # Keep sending for the whole wait: a TV in deep standby answers nothing
+        # (reads as "off") and can sleep through any single burst.
+        if cfg.mac and time.time() >= next_send:
+            send_wol_all(cfg)
+            next_send = time.time() + WOL_RESEND_S
+        if power_state(cfg.host) == "on":
             return {"state": "on", "woke": True, "seconds": round(time.time() - started, 1)}
-        if state == "standby" and not resent and cfg.mac:
-            # Some models need a second packet once the network stack is up.
-            send_wol(cfg.mac, cfg.broadcast)
-            resent = True
         time.sleep(1.0)
     raise TvError(f"TV did not wake within {cfg.wake_timeout_s}s")
 
