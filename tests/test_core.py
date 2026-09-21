@@ -10,7 +10,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
-from battlestation import config, edid, hypr, luagen, mangohud, pad, scenes, stream, sunshine, tv, ws  # noqa: E402
+from battlestation import config, drmprops, edid, hypr, live, luagen, mangohud, pad, scenes, stream, sunshine, tv, ws  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures"
 TV_DESC = "Samsung Electric Company SAMSUNG 0x01000E00"
@@ -325,6 +325,27 @@ class MangoHudTests(unittest.TestCase):
         self.assertIn(mangohud.MARKER, text)
         self.assertEqual(text.count("env MANGOHUD=1 MANGOHUD_CONFIGFILE=/x/mangohud.conf /usr/bin/steam"), 2)
         self.assertNotIn("no_display", mangohud.render_config())
+
+
+class LiveSignalTests(unittest.TestCase):
+    def test_enum_name(self):
+        import struct
+        raw = struct.pack("Q32s", 0, b"Default") + struct.pack("Q32s", 9, b"BT2020_RGB")
+        self.assertEqual(drmprops.enum_name(raw, 9), "BT2020_RGB")
+        self.assertEqual(drmprops.enum_name(raw, 0), "Default")
+        self.assertIsNone(drmprops.enum_name(raw, 3))
+
+    def test_snapshot_and_emit(self):
+        drm = {"HDMI-A-1": {"vrr_capable": True, "vrr_enabled": True, "hdr_metadata": True,
+                            "colorspace": "BT2020_RGB", "max_bpc": 10, "card": "card1"}}
+        snap = live.snapshot(drm)
+        self.assertEqual(snap, {"HDMI-A-1": {"vrrEnabled": True, "hdrMetadata": True,
+                                             "colorspace": "BT2020_RGB", "maxBpc": 10}})
+        self.assertTrue(live.should_emit(None, snap, 0, 10))
+        self.assertFalse(live.should_emit(snap, dict(snap), 1, 10))
+        self.assertTrue(live.should_emit(snap, dict(snap), 10, 10))
+        off = {"HDMI-A-1": dict(snap["HDMI-A-1"], hdrMetadata=False)}
+        self.assertTrue(live.should_emit(snap, off, 1, 10))
 
 
 class WebSocketTests(unittest.TestCase):

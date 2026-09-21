@@ -15,6 +15,7 @@ Picture opens fullscreen. Close Big Picture and it offers to put things back.
 - **Controller:** whether an Xbox pad is connected, and its battery.
   xpadneo only reports a battery level, so the pill shows level icons rather than an invented percentage.
 - **Game:** detects running Steam games, shows live FPS from MangoHud's log, and tracks session time.
+- **In-game overlay:** FPS, HDR and VRR in a corner above fullscreen games, toggled with one key.
 - **Scenes:** switch from the panel, a keybind, IPC, the pill (middle-click), or a held controller chord (View + Menu by default).
 
 ## Install
@@ -39,6 +40,7 @@ Optional extras:
 | Xbox Wireless dongle | AUR `xone-dkms` + `xone-dongle-firmware` |
 | Wake the TV / switch input | add a `[tv]` section, run `battlestation tv pair` and accept the prompt on the TV |
 | Keybind | `o.bind("SUPER + CTRL + G", "Toggle gaming scene", "omarchy-shell io.github.samueljenkinsml.battlestation toggleScene")` in `~/.config/hypr/bindings.lua` |
+| In-game overlay key | `o.bind("SUPER + ALT + H", "Toggle gaming overlay", "omarchy-shell io.github.samueljenkinsml.battlestation osdToggle")` |
 | A key per scene | `o.bind("SUPER + CTRL + ALT + 1", "TV only", "omarchy-shell io.github.samueljenkinsml.battlestation scene tv")`, one line per scene. SUPER + CTRL + ALT + number is free in Omarchy |
 
 Then run `battlestation doctor`. It checks every piece and tells you what's missing and how to fix it.
@@ -55,8 +57,27 @@ Then run `battlestation doctor`. It checks every piece and tells you what's miss
 
 IPC (`omarchy-shell io.github.samueljenkinsml.battlestation <method>`):
 `state`, `scene <name>`, `toggleScene`, `cycleScene`, `keep`, `revert`,
-`tvWake`, `capture`, `refresh`. The panel also responds to
+`tvWake`, `capture`, `osdToggle`, `osdShow`, `osdHide`, `osdState`, `refresh`. The panel also responds to
 `omarchy-shell shell toggle io.github.samueljenkinsml.battlestation`.
+
+## In-game overlay
+
+Bind `osdToggle` (see Install) and press it in game to pin a small card in the
+top-left corner of the focused monitor. Press it again to hide it. It stays
+pinned across shell restarts, and it takes no clicks or keys away from the game.
+
+| Row | Shows |
+| --- | --- |
+| **FPS** | Live FPS, frame time and a short history, from MangoHud's log. Needs `battlestation setup mangohud`. Without it the row says `no MangoHud data` |
+| **HDR** | `On · BT2020 RGB` when HDR metadata is actually being sent to the display, so it catches `hdr = "auto"` switching on for a fullscreen HDR game. Otherwise `Armed (auto)`, `Off` or `SDR only`, plus 8/10-bit |
+| **VRR** | `Active` when the kernel has VRR engaged on that output, `Ready` when it is configured but not engaged, and the refresh rate. It also flags `tearing` and `scanout` (direct scanout) |
+
+While the overlay is up, Battlestation reads the display's live signal state
+from DRM once a second. When it's hidden, nothing extra runs.
+
+Any surface drawn over a fullscreen game can stop Hyprland from using direct
+scanout, and possibly tearing. That's why the overlay is a toggle: check what
+you need, then hide it.
 
 ## Configuration
 

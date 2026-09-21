@@ -1,5 +1,6 @@
 """DRM connector properties Hyprland does not expose: vrr_capable on the
-connector and the live VRR_ENABLED flag on the CRTC driving it.
+connector, the live VRR_ENABLED flag on the CRTC driving it, and what is
+actually on the wire (HDR_OUTPUT_METADATA, Colorspace, max bpc).
 
 Adapted from edbron/omarchy-monitor-placement-refresh-rate
 (bin/omarchy-monitor-drm-props, MIT, (c) 2026 edbron). Plain KMS ioctls on
@@ -14,6 +15,7 @@ DRM_IOCTL_MODE_GETPROPERTY      = 0xC04064AA
 DRM_IOCTL_MODE_GETENCODER       = 0xC01464A6
 DRM_MODE_OBJECT_CONNECTOR       = 0xC0C0C0C0
 DRM_MODE_OBJECT_CRTC            = 0xCCCCCCCC
+DRM_MODE_PROP_ENUM              = 1 << 3
 CONNECTOR_NAMES = {1:"VGA",2:"DVI-I",3:"DVI-D",4:"DVI-A",5:"Composite",6:"SVIDEO",7:"LVDS",8:"Component",
                    9:"DIN",10:"DP",11:"HDMI-A",12:"HDMI-B",13:"TV",14:"eDP",15:"Virtual",16:"DSI",17:"DPI",
                    18:"WRITEBACK",19:"SPI",20:"USB"}
@@ -54,7 +56,32 @@ def get_encoder_crtc(fd, eid):
     ioctl(fd, DRM_IOCTL_MODE_GETENCODER, buf)
     return struct.unpack(fmt, bytes(buf))[2]
 
-def get_props(fd, cid, obj_type=DRM_MODE_OBJECT_CONNECTOR):
+def get_enum_name(fd, prop_id, value):
+    """Name of an enum property's current value, e.g. Colorspace -> "BT2020_RGB"."""
+    pfmt = "QQII32sII"
+    pbuf = bytearray(struct.pack(pfmt, 0, 0, prop_id, 0, b"", 0, 0))
+    ioctl(fd, DRM_IOCTL_MODE_GETPROPERTY, pbuf)
+    nvals, nenums = struct.unpack(pfmt, bytes(pbuf))[5:7]
+    if not nenums:
+        return None
+    vals = (ctypes.c_uint64 * max(nvals, 1))()
+    # struct drm_mode_property_enum: u64 value, char name[32]
+    enums = (ctypes.c_uint8 * (40 * nenums))()
+    pbuf = bytearray(struct.pack(pfmt, ctypes.addressof(vals), ctypes.addressof(enums), prop_id, 0, b"", nvals, nenums))
+    ioctl(fd, DRM_IOCTL_MODE_GETPROPERTY, pbuf)
+    return enum_name(bytes(enums), value)
+
+
+def enum_name(raw: bytes, value):
+    for off in range(0, len(raw) - 39, 40):
+        v, name = struct.unpack_from("Q32s", raw, off)
+        if v == value:
+            return name.split(b"\0")[0].decode(errors="replace")
+    return None
+
+
+def get_props(fd, cid, obj_type=DRM_MODE_OBJECT_CONNECTOR, enums=()):
+    """{name: value}; properties named in `enums` come back as their enum name."""
     fmt = "QQIIII"  # props_ptr, prop_values_ptr, count_props, obj_id, obj_type, pad
     buf = bytearray(struct.pack(fmt, 0, 0, 0, cid, obj_type, 0))
     ioctl(fd, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, buf)
@@ -68,13 +95,21 @@ def get_props(fd, cid, obj_type=DRM_MODE_OBJECT_CONNECTOR):
         pfmt = "QQII32sII"
         pbuf = bytearray(struct.pack(pfmt, 0, 0, ids[i], 0, b"", 0, 0))
         ioctl(fd, DRM_IOCTL_MODE_GETPROPERTY, pbuf)
-        name = struct.unpack(pfmt, bytes(pbuf))[4].split(b"\0")[0].decode()
-        out[name] = vals[i]
+        _, _, _, flags, raw_name, _, _ = struct.unpack(pfmt, bytes(pbuf))
+        name = raw_name.split(b"\0")[0].decode()
+        value = vals[i]
+        if name in enums and flags & DRM_MODE_PROP_ENUM:
+            value = get_enum_name(fd, ids[i], value)
+        out[name] = value
     return out
 
-
 def read() -> dict:
-    """{connector: {"vrr_capable": bool, "vrr_enabled": bool|None, "card": str}}"""
+    """{connector: {"vrr_capable", "vrr_enabled", "hdr_metadata", "colorspace", "max_bpc", "card"}}
+
+    hdr_metadata is True while an HDR_OUTPUT_METADATA blob is attached, i.e. the
+    display is being told it receives HDR; that holds for Hyprland's fullscreen
+    passthrough too, which colorManagementPreset does not show.
+    """
     result = {}
     for path in sorted(glob.glob("/dev/dri/card[0-9]*")):
         try:
@@ -87,13 +122,18 @@ def read() -> dict:
                     name, connection, encoder_id = get_connector(fd, cid)
                     if connection != 1:  # 1 = connected
                         continue
-                    props = get_props(fd, cid)
+                    props = get_props(fd, cid, enums=("Colorspace",))
                     enabled = None
                     crtc = get_encoder_crtc(fd, encoder_id)
                     if crtc:
                         enabled = bool(get_props(fd, crtc, DRM_MODE_OBJECT_CRTC).get("VRR_ENABLED", 0))
+                    bpc = props.get("max bpc")
                     result[name] = {"vrr_capable": bool(props.get("vrr_capable", 0)),
-                                    "vrr_enabled": enabled, "card": os.path.basename(path)}
+                                    "vrr_enabled": enabled,
+                                    "hdr_metadata": bool(props.get("HDR_OUTPUT_METADATA", 0)),
+                                    "colorspace": props.get("Colorspace") or None,
+                                    "max_bpc": int(bpc) if bpc is not None else None,
+                                    "card": os.path.basename(path)}
                 except OSError:
                     continue
         except OSError:

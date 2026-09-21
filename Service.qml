@@ -378,6 +378,33 @@ Item {
     }
   }
 
+  // ---- in-game overlay (SUPER + ALT + H) ----
+  // Pinned on or off; remembered in its own file so toggling it never
+  // triggers a scene-state refresh.
+  property bool osdVisible: false
+  readonly property string osdPath: Quickshell.env("HOME") + "/.local/state/battlestation/osd.json"
+
+  function setOsd(on) {
+    osdVisible = on
+    osdFile.setText(JSON.stringify({ visible: on }) + "\n")
+  }
+
+  FileView {
+    id: osdFile
+    path: root.osdPath
+    printErrors: false
+    onLoaded: {
+      try { root.osdVisible = JSON.parse(text()).visible === true } catch (e) {}
+    }
+  }
+
+  GameOsd {
+    svc: root
+    shown: root.osdVisible
+  }
+
+  Binding { target: displayState; property: "live"; value: root.osdVisible }
+
   // ---- IPC: omarchy-shell io.github.samueljenkinsml.battlestation <method> ----
   IpcHandler {
     target: root.pluginId
@@ -393,7 +420,8 @@ Item {
                util: gpuSampler.util, memUsedMiB: gpuSampler.memUsed, memTotalMiB: gpuSampler.memTotal,
                powerW: gpuSampler.power } : null,
         controller: { connected: controllerState.connected, name: controllerState.name, battery: controllerState.battery },
-        game: gameWatcher.currentGame, fps: gameWatcher.fps
+        game: gameWatcher.currentGame, fps: gameWatcher.fps,
+        osd: root.osdVisible
       })
     }
     function scene(name: string): void { root.enterScene(name) }
@@ -408,6 +436,10 @@ Item {
     function streamOff(): void { if (root.streamEnabled) root.streamToggle() }
     function streamDetach(): void { root.streamDetach() }
     function streamState(): string { return JSON.stringify(root.stream) }
+    function osdToggle(): void { root.setOsd(!root.osdVisible) }
+    function osdShow(): void { root.setOsd(true) }
+    function osdHide(): void { root.setOsd(false) }
+    function osdState(): string { return root.osdVisible ? "visible" : "hidden" }
     function refresh(): void { root.refreshState(); displayState.refresh(); displayState.refreshCaps(); gameWatcher.rescan() }
   }
 
