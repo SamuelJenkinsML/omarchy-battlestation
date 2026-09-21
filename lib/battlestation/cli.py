@@ -11,7 +11,7 @@ import tomllib
 
 from . import PLUGIN_ID, __version__
 from . import config as config_mod
-from . import controller, doctor, drmprops, edid, fsutil, hypr, mangohud, pad, paths, scenes, steam, tv
+from . import controller, doctor, drmprops, edid, fsutil, hypr, mangohud, pad, paths, scenes, steam, stream, sunshine, tv
 
 
 def out(obj) -> None:
@@ -71,6 +71,7 @@ def cmd_state(args) -> int:
             "controller": {"chord": cfg.controller.chord, "holdMs": cfg.controller.hold_ms,
                            "ignoreVendor": cfg.controller.ignore_vendor},
             "tvConfigured": cfg.tv.configured,
+            "stream": stream.status(cfg.stream),
             "configErrors": [],
         })
     except config_mod.ConfigError as exc:
@@ -87,6 +88,8 @@ def cmd_caps(args) -> int:
     result = {}
     for mon in hypr.monitors():
         name = str(mon.get("name"))
+        if stream.load_state().get("output") == name:
+            continue  # the virtual streaming output has no EDID or link to describe
         caps = edid.read_caps(name)
         w, h, hz = int(mon.get("width") or 0), int(mon.get("height") or 0), float(mon.get("refreshRate") or 0)
         d = caps.to_dict()
@@ -112,7 +115,7 @@ def cmd_scene_apply(args) -> int:
 
 def cmd_scene_render(args) -> int:
     cfg = _load_cfg()
-    text, res = scenes.render(cfg.scene(args.name), hypr.monitors())
+    text, res = scenes.render(cfg.scene(args.name), scenes.real_monitors(cfg))
     sys.stdout.write(text)
     for note in res.notes + [f"not connected: {m}" for m in res.missing]:
         sys.stderr.write(f"note: {note}\n")
@@ -192,8 +195,13 @@ def cmd_scene_enter(args) -> int:
 
 
 def cmd_scene_auto(args) -> int:
+    if stream.load_state().get("attached"):
+        # Attaching switches the displays off, which looks like a hotplug. The
+        # stream overlay owns the layout until the client leaves.
+        out({"ok": True, "changed": False, "skipped": "streaming"})
+        return 0
     cfg = _load_cfg()
-    name = scenes.pick_auto(cfg, hypr.monitors())
+    name = scenes.pick_auto(cfg, scenes.real_monitors(cfg))
     if not name:
         return fail("no scene matches the connected monitors")
     if name == scenes.load_state().get("active") and not args.force:
@@ -231,7 +239,7 @@ def cmd_scene_capture(args) -> int:
     cfg = config_mod.load()
     if args.name in cfg.scenes:
         return fail(f"scene '{args.name}' already exists; pick another name or edit {cfg_path}")
-    scene = scenes.capture_scene(args.name, args.label)
+    scene = scenes.capture_scene(args.name, args.label, skip_output=cfg.stream.output)
     new_text = existing.rstrip("\n") + "\n" + scenes.append_scene_text(scene)
     config_mod.parse(tomllib.loads(new_text))
     fsutil.atomic_write(cfg_path, new_text)
@@ -281,6 +289,54 @@ def cmd_tv(args) -> int:
     return 0
 
 
+def cmd_stream(args) -> int:
+    action = args.action
+    if action == "detach":
+        # Sunshine's `undo`, the watchdog and the panic keybind all land here.
+        # It turns the TV back on, so it must not depend on a valid config.
+        try:
+            out({"ok": True, **stream.detach(args.reason or "client left")})
+        except Exception as exc:  # noqa: BLE001 - report, never fail the undo
+            out({"ok": False, "error": str(exc)})
+        return 0
+    if action == "off":
+        stream.set_enabled(False)
+        try:
+            st = config_mod.load().stream
+        except config_mod.ConfigError:
+            st = None
+        out({"ok": True, **stream.disarm(st)})
+        return 0
+
+    cfg = _load_cfg()
+    st = cfg.stream
+    if action == "status":
+        out({"ok": True, **stream.status(st)})
+        return 0
+    if not st.configured:
+        return fail("add a [stream] section to the config first (see `battlestation setup stream`)")
+    if action == "on":
+        stream.set_enabled(True)
+        result = stream.arm(st)
+        notify("Streaming on", "Ready for Moonlight.", glyph="󰑈")
+        out({"ok": True, **result})
+    elif action == "arm":
+        out({"ok": True, **stream.arm(st)})
+    elif action == "disarm":
+        out({"ok": True, **stream.disarm(st)})
+    elif action == "attach":
+        if not stream.is_enabled():
+            out({"ok": True, "attached": False, "skipped": "switched off"})
+            return 0
+        out({"ok": True, **stream.attach(st)})
+    elif action == "watchdog":
+        if not stream.is_enabled():
+            out({"ok": True, "action": "none", "skipped": "switched off"})
+            return 0
+        out({"ok": True, **stream.watchdog(st)})
+    return 0
+
+
 def cmd_steam(args) -> int:
     out({"ok": True, "launch": steam.open_big_picture(), "running": steam.running()})
     return 0
@@ -295,6 +351,44 @@ def cmd_setup_mangohud(args) -> int:
         result["warning"] = (result.get("warning", "") + " mangohud is not installed: "
                              "sudo pacman -S mangohud lib32-mangohud").strip()
     out({"ok": True, **result, "note": "Restart Steam so it picks up the new launcher."})
+    return 0
+
+
+def cmd_setup_stream(args) -> int:
+    """Guided setup. Prints the root steps for you to run; never runs them."""
+    import os
+
+    cfg = _load_cfg()
+    st = cfg.stream
+    steps = sunshine.privileged_steps(st, uinput_ok=os.access("/dev/uinput", os.W_OK))
+    conf_text = fsutil.read_text(paths.sunshine_conf())
+    written = None
+    if args.write_config:
+        try:
+            written = sunshine.write_conf(st)
+        except ValueError as exc:
+            return fail(str(exc))
+        conf_text = fsutil.read_text(paths.sunshine_conf())
+    missing = sunshine.missing_keys(st, conf_text)
+    if args.json:
+        out({"ok": True, "configured": st.configured, "steps": steps, "sunshineConf": str(paths.sunshine_conf()),
+             "missingKeys": missing, "written": written})
+        return 0
+
+    print("Battlestation streaming setup. Nothing below is run for you.\n")
+    if not st.configured:
+        print(f"0. Add a [stream] section to {paths.config_file()} (an empty one is enough).\n")
+    for i, step in enumerate(steps, 1):
+        print(f"{i}. {step['title']}\n   {step['why']}")
+        for cmd in step["commands"]:
+            print(f"     {cmd}")
+        print()
+    if missing:
+        print(f"Sunshine config ({paths.sunshine_conf()}) still needs: {', '.join(missing)}")
+        print("   Run `battlestation setup stream --write-config` to merge them; other settings are kept.")
+    else:
+        print("Sunshine config: ready." + (" (just written)" if written and written["changed"] else ""))
+    print("\nThen: set a login at https://localhost:47990, switch streaming on in the panel, pair Moonlight.")
     return 0
 
 
@@ -367,11 +461,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("bigpicture", help="open Steam Big Picture").set_defaults(func=cmd_steam)
 
+    st = sub.add_parser("stream", help="headless streaming host: on, off, status, detach")
+    st.add_argument("action", choices=["on", "off", "status", "detach", "arm", "disarm", "attach", "watchdog"],
+                    help="on/off switch the feature; detach gives the desktop back; "
+                         "arm, disarm, attach and watchdog are (internal)")
+    st.add_argument("--reason", default="")
+    st.set_defaults(func=cmd_stream)
+
     su = sub.add_parser("setup", help="optional integrations").add_subparsers(dest="what", required=True)
     m = su.add_parser("mangohud", help="MangoHud profile + Steam launcher override for FPS")
     m.add_argument("--style", choices=sorted(mangohud.HUD_STYLES), default="minimal")
     m.add_argument("--remove", action="store_true")
     m.set_defaults(func=cmd_setup_mangohud)
+
+    ss = su.add_parser("stream", help="print the one-time steps for the streaming host")
+    ss.add_argument("--write-config", action="store_true", help="merge our keys into sunshine.conf")
+    ss.add_argument("--json", action="store_true")
+    ss.set_defaults(func=cmd_setup_stream)
 
     sub.add_parser("controller", help="JSON: controller batteries and drivers").set_defaults(func=cmd_controller)
 
@@ -391,7 +497,7 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except config_mod.ConfigError as exc:
         return fail("config: " + "; ".join(exc.problems))
-    except (scenes.SceneError, hypr.HyprError) as exc:
+    except (scenes.SceneError, hypr.HyprError, stream.StreamError) as exc:
         return fail(str(exc))
     except BrokenPipeError:
         return 0

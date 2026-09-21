@@ -71,7 +71,7 @@ Item {
       vrrLive: !!mon.vrr || c.vrrEnabled === true,
       vrrMode: vrrMode,
       maxBpc: c.maxBpcAtMode || 8,
-      link: c.is_hdmi ? (c.max_frl_gbps ? ("HDMI 2.1 · " + c.max_frl_gbps + " Gbps FRL") : ("HDMI · " + (c.max_tmds_mhz || 340) + " MHz TMDS")) : "DisplayPort",
+      link: Object.keys(c).length === 0 ? "Virtual" : c.is_hdmi ? (c.max_frl_gbps ? ("HDMI 2.1 · " + c.max_frl_gbps + " Gbps FRL") : ("HDMI · " + (c.max_tmds_mhz || 340) + " MHz TMDS")) : "DisplayPort",
       tearing: !!mon.activelyTearing,
       directScanout: String(mon.directScanoutTo || "") !== "" && String(mon.directScanoutTo) !== "0"
     }

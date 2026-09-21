@@ -22,6 +22,7 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 _POS_RE = re.compile(r"^(auto|-?\d+x-?\d+)$")
 _MODE_RE = re.compile(r"^(preferred|highres|highrr|\d+x\d+(@[\d.]+)?)$")
 _MAC_RE = re.compile(r"^[0-9a-f]{2}([:-][0-9a-f]{2}){5}$", re.I)
+_OUTPUT_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")  # same alphabet as hypr.CONNECTOR_RE
 
 
 class ConfigError(ValueError):
@@ -73,6 +74,29 @@ class TvConfig:
         return bool(self.host)
 
 
+SUNSHINE_UNIT = "app-dev.lizardbyte.app.Sunshine.service"
+
+
+@dataclass
+class StreamConfig:
+    """Headless streaming host. Having a [stream] section makes the feature
+    available; whether it is switched on lives in paths.stream_flag()."""
+
+    configured: bool = False
+    output: str = "BS-STREAM"
+    default_mode: str = "1920x1080@60"  # used when the client does not say
+    max_width: int = 3840
+    max_height: int = 2160
+    max_fps: int = 120
+    scale: float = 1.0
+    unit: str = SUNSHINE_UNIT
+    manage_unit: bool = True
+    idle_inhibit: bool = True
+    watchdog_idle_s: int = 45
+    on_attach: list[str] = field(default_factory=list)
+    on_detach: list[str] = field(default_factory=list)
+
+
 @dataclass
 class ControllerConfig:
     chord: list[str] = field(default_factory=lambda: ["BTN_SELECT", "BTN_START"])
@@ -88,6 +112,7 @@ class Config:
     auto_scene_on_hotplug: bool = False
     controller: ControllerConfig = field(default_factory=ControllerConfig)
     tv: TvConfig = field(default_factory=TvConfig)
+    stream: StreamConfig = field(default_factory=StreamConfig)
     scenes: dict[str, Scene] = field(default_factory=dict)
 
     def scene(self, name: str) -> Scene:
@@ -183,6 +208,41 @@ def _scene(name: str, raw, problems: list[str]) -> Scene | None:
     return scene
 
 
+def _stream(raw, st: StreamConfig, problems: list[str]) -> None:
+    if not isinstance(raw, dict):
+        problems.append("[stream] must be a table")
+        return
+    st.configured = True
+    st.output = str(raw.get("output", st.output)).strip()
+    if not _OUTPUT_RE.match(st.output):
+        problems.append("stream.output must be a plain name (letters, digits, '.', '_' or '-')")
+    st.default_mode = str(raw.get("default_mode", st.default_mode))
+    if not re.match(r"^\d+x\d+(@[\d.]+)?$", st.default_mode):
+        problems.append(f"stream.default_mode '{st.default_mode}' is not WIDTHxHEIGHT@HZ")
+    for key, low, high in (("max_width", 640, 7680), ("max_height", 480, 4320), ("max_fps", 24, 240),
+                           ("watchdog_idle_s", 15, 600)):
+        try:
+            value = int(raw.get(key, getattr(st, key)))
+            if not low <= value <= high:
+                raise ValueError
+            setattr(st, key, value)
+        except (TypeError, ValueError):
+            problems.append(f"stream.{key} must be a whole number between {low} and {high}")
+    try:
+        st.scale = float(raw.get("scale", st.scale))
+        if not 0.25 <= st.scale <= 4:
+            raise ValueError
+    except (TypeError, ValueError):
+        problems.append("stream.scale must be a number between 0.25 and 4")
+    st.unit = str(raw.get("unit", st.unit)).strip()
+    if not re.match(r"^[A-Za-z0-9@._:-]+\.service$", st.unit):
+        problems.append("stream.unit must be a systemd user unit name ending in .service")
+    st.manage_unit = bool(raw.get("manage_unit", st.manage_unit))
+    st.idle_inhibit = bool(raw.get("idle_inhibit", st.idle_inhibit))
+    st.on_attach = _str_list(raw.get("on_attach"), "stream.on_attach", problems)
+    st.on_detach = _str_list(raw.get("on_detach"), "stream.on_detach", problems)
+
+
 def parse(data: dict) -> Config:
     problems: list[str] = []
     cfg = Config()
@@ -209,6 +269,9 @@ def parse(data: dict) -> Config:
     cfg.tv.input_key = str(tv.get("input_key", "")).strip()
     cfg.tv.input_fallback = _str_list(tv.get("input_fallback"), "tv.input_fallback", problems)
     cfg.tv.wake_timeout_s = int(tv.get("wake_timeout_s", cfg.tv.wake_timeout_s))
+
+    if "stream" in data:
+        _stream(data.get("stream"), cfg.stream, problems)
 
     scenes = data.get("scene", {}) or {}
     if not isinstance(scenes, dict):

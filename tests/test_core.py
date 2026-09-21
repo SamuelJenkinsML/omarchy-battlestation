@@ -10,7 +10,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
-from battlestation import config, edid, luagen, mangohud, pad, scenes, ws  # noqa: E402
+from battlestation import config, edid, hypr, luagen, mangohud, pad, scenes, stream, sunshine, ws  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures"
 TV_DESC = "Samsung Electric Company SAMSUNG 0x01000E00"
@@ -289,6 +289,367 @@ class WebSocketTests(unittest.TestCase):
         self.assertEqual(len(tv.magic_packet("aa:bb:cc:dd:ee:ff")), 102)
         with self.assertRaises(tv.TvError):
             tv.magic_packet("nope")
+
+
+HEADLESS = mon("BS-STREAM", "", 1280, 800, 60.0, ["1920x1080@60.00Hz"])
+STREAM_CFG = SINGLE + """
+[stream]
+default_mode = "1280x800@60"
+max_fps = 90
+"""
+
+
+class InstanceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.runtime = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def make(self, name, pid, socket=True):
+        d = self.runtime / name
+        d.mkdir()
+        (d / "hyprland.lock").write_text(f"{pid}\nwayland-1\n")
+        if socket:
+            (d / ".socket.sock").touch()
+        return d
+
+    def test_stale_inherited_signature_is_replaced_by_the_live_one(self):
+        self.make("stale", 2 ** 22 + 12345)  # no such pid
+        self.make("live", os.getpid())
+        with mock.patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": "stale"}):
+            self.assertEqual(hypr.discover_instance(self.runtime), "live")
+
+    def test_live_inherited_signature_is_trusted(self):
+        # A nested dev session must keep talking to its own compositor.
+        self.make("mine", os.getpid())
+        newer = self.make("other", os.getpid())
+        os.utime(newer, (2_000_000_000, 2_000_000_000))
+        with mock.patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": "mine"}):
+            self.assertEqual(hypr.discover_instance(self.runtime), "mine")
+
+    def test_no_socket_or_no_instances(self):
+        self.make("half", os.getpid(), socket=False)
+        with mock.patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": ""}):
+            self.assertIsNone(hypr.discover_instance(self.runtime))
+            self.assertIsNone(hypr.discover_instance(self.runtime / "missing"))
+
+
+class StreamConfigTests(unittest.TestCase):
+    def test_section_makes_it_available(self):
+        self.assertFalse(cfg_from(SINGLE).stream.configured)
+        st = cfg_from(STREAM_CFG).stream
+        self.assertTrue(st.configured)
+        self.assertEqual((st.output, st.default_mode, st.max_fps), ("BS-STREAM", "1280x800@60", 90))
+
+    def test_rejects_unsafe_values(self):
+        bad = SINGLE + '[stream]\noutput = "x\\"; os.exit()"\nunit = "evil; rm"\nmax_fps = 9000\ndefault_mode = "big"\n'
+        with self.assertRaises(config.ConfigError) as ctx:
+            cfg_from(bad)
+        text = " ".join(ctx.exception.problems)
+        for key in ("stream.output", "stream.unit", "stream.max_fps", "stream.default_mode"):
+            self.assertIn(key, text)
+
+    def test_client_mode_is_clamped_and_even(self):
+        st = cfg_from(STREAM_CFG).stream
+        env = {"SUNSHINE_CLIENT_WIDTH": "1281", "SUNSHINE_CLIENT_HEIGHT": "801", "SUNSHINE_CLIENT_FPS": "240"}
+        self.assertEqual(stream.client_mode(env, st), "1280x800@90")
+        self.assertEqual(stream.client_mode({}, st), "1280x800@60")
+        junk = {"SUNSHINE_CLIENT_WIDTH": "$(reboot)", "SUNSHINE_CLIENT_HEIGHT": "inf", "SUNSHINE_CLIENT_FPS": "-5"}
+        self.assertEqual(stream.client_mode(junk, st), "1280x800@24")
+        huge = {"SUNSHINE_CLIENT_WIDTH": "99999", "SUNSHINE_CLIENT_HEIGHT": "99999"}
+        self.assertEqual(stream.client_mode(huge, st), "3840x2160@60")
+
+
+class StreamLuaTests(unittest.TestCase):
+    def test_parked_touches_nothing_else(self):
+        text = luagen.render_stream("BS-STREAM", "1280x800@60")
+        self.assertIn("Stream overlay: parked", text)
+        self.assertIn('position = "20000x0"', text)
+        self.assertIn('hl.workspace_rule({ workspace = "99", monitor = "BS-STREAM", default = true })', text)
+        self.assertNotIn("disabled", text)
+        self.assertNotIn("os.getenv", text)
+
+    def test_attached_is_guarded_by_the_instance(self):
+        text = luagen.render_stream("BS-STREAM", "1280x800@90", attached=True, disable=["HDMI-A-1"], instance="sig_1")
+        self.assertIn('mode = "1280x800@90", position = "0x0"', text)
+        guard = text.index('if os.getenv("HYPRLAND_INSTANCE_SIGNATURE") == "sig_1" then')
+        self.assertGreater(text.index('hl.monitor({ output = "HDMI-A-1", disabled = true })'), guard)
+        self.assertTrue(text.rstrip().endswith("end"))
+        with self.assertRaises(ValueError):
+            luagen.render_stream("BS-STREAM", "1280x800@90", attached=True, disable=["HDMI-A-1"])
+
+    def test_attached_with_no_real_display(self):
+        text = luagen.render_stream("BS-STREAM", "1280x800@60", attached=True, disable=[], instance="sig_1")
+        self.assertIn("Stream overlay: attached", text)
+        self.assertNotIn("disabled", text)
+
+
+class StreamTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.env = mock.patch.dict(os.environ, {
+            "XDG_STATE_HOME": self.tmp.name + "/state", "XDG_CONFIG_HOME": self.tmp.name + "/config",
+            "XDG_RUNTIME_DIR": self.tmp.name + "/run"})
+        self.env.start()
+        self.monitors = [TV, HEADLESS]
+        self.reload = mock.patch("battlestation.hypr.reload").start()
+        self.errors = mock.patch("battlestation.hypr.config_errors", return_value=[]).start()
+        mock.patch("battlestation.hypr.monitors", side_effect=lambda *a, **k: list(self.monitors)).start()
+        mock.patch("battlestation.hypr.instance_signature", side_effect=lambda: self.sig).start()
+        self.create = mock.patch("battlestation.hypr.create_headless").start()
+        self.clients, self.workspaces = [], []
+        mock.patch("battlestation.hypr.clients", side_effect=lambda: list(self.clients)).start()
+        mock.patch("battlestation.hypr.workspaces", side_effect=lambda: list(self.workspaces)).start()
+        self.dispatch = mock.patch("battlestation.hypr.dispatch").start()
+        self.remove = mock.patch("battlestation.hypr.remove_output").start()
+        self.unit = {"loaded": True, "active": True, "pid": 100, "enabled": False}
+        mock.patch("battlestation.stream.unit_state", side_effect=lambda unit: dict(self.unit)).start()
+        self.systemctl = mock.patch("battlestation.stream._systemctl").start()
+        self.quiet = mock.patch("battlestation.stream._run_quiet").start()
+        self.sessions = mock.patch("battlestation.stream.encoder_sessions", return_value=1).start()
+        mock.patch("battlestation.edid.read_caps", side_effect=caps_for).start()
+        mock.patch("battlestation.scenes.edid.read_caps", side_effect=caps_for).start()
+        mock.patch("time.sleep").start()
+        self.sig = "sig_1"
+        self.cfg = cfg_from(STREAM_CFG)
+        self.st = self.cfg.stream
+
+    def tearDown(self):
+        mock.patch.stopall()
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def overlay(self):
+        from battlestation import paths
+        return paths.stream_lua().read_text() if paths.stream_lua().exists() else None
+
+    def test_switched_off_means_arm_does_nothing(self):
+        self.assertEqual(stream.arm(self.st)["armed"], False)
+        self.assertIsNone(self.overlay())
+        self.systemctl.assert_not_called()
+
+    def test_flag_round_trip(self):
+        self.assertFalse(stream.is_enabled())
+        stream.set_enabled(True)
+        self.assertTrue(stream.is_enabled())
+        stream.set_enabled(False)
+        stream.set_enabled(False)
+        self.assertFalse(stream.is_enabled())
+
+    def test_arm_creates_the_output_after_the_rule_then_starts_sunshine(self):
+        stream.set_enabled(True)
+        self.monitors = [TV]
+        self.unit["active"] = False
+        order = []
+        self.reload.side_effect = lambda: order.append("reload")
+        self.create.side_effect = lambda name: order.append("create")
+        self.systemctl.side_effect = lambda action, unit: order.append(action)
+        result = stream.arm(self.st)
+        self.assertTrue(result["created"])
+        self.assertEqual(order, ["reload", "create", "start"])
+        self.assertIn("parked", self.overlay())
+
+    def test_arm_restarts_a_sunshine_that_started_before_the_output(self):
+        stream.set_enabled(True)
+        self.monitors = [TV]
+        stream.arm(self.st)
+        self.systemctl.assert_called_once_with("restart", self.st.unit)
+
+    def test_attach_detach_leaves_the_scene_file_untouched(self):
+        from battlestation import paths
+        scenes.apply(self.cfg, "tv-desktop", confirm=False)
+        scene_before = paths.scene_lua().read_bytes()
+        self.assertNotIn("BS-STREAM", scene_before.decode())  # the virtual output is never a scene's business
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        env = {"SUNSHINE_CLIENT_WIDTH": "1280", "SUNSHINE_CLIENT_HEIGHT": "800", "SUNSHINE_CLIENT_FPS": "90"}
+        result = stream.attach(self.st, env)
+        self.assertEqual(result["disabled"], ["HDMI-A-1"])
+        self.assertIn('"sig_1"', self.overlay())
+        self.assertTrue(stream.load_state()["attached"])
+        again = self.overlay()
+        stream.attach(self.st, env)  # idempotent
+        self.assertEqual(self.overlay(), again)
+        self.assertTrue(stream.detach()["changed"])
+        self.assertIn("parked", self.overlay())
+        self.assertFalse(stream.detach()["changed"])  # idempotent
+        self.assertEqual(paths.scene_lua().read_bytes(), scene_before)
+
+    def test_attach_rolls_back_when_hyprland_rejects_the_overlay(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        parked = self.overlay()
+        self.errors.return_value = ["battlestation-stream.lua:4: boom"]
+        with self.assertRaises(stream.StreamError):
+            stream.attach(self.st, {})
+        self.assertEqual(self.overlay(), parked)
+        self.assertFalse(stream.load_state().get("attached"))
+
+    def test_idle_flag_is_only_cleared_if_we_set_it(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        with mock.patch("battlestation.stream._stay_awake_flag", return_value=True):
+            stream.attach(self.st, {})
+        stream.detach()
+        self.quiet.assert_not_called()
+        with mock.patch("battlestation.stream._stay_awake_flag", return_value=False):
+            stream.attach(self.st, {})
+        stream.detach()
+        self.assertEqual([c.args[0] for c in self.quiet.call_args_list], [stream.STAY_AWAKE, stream.ALLOW_IDLE])
+
+    def test_client_sees_the_users_workspace_and_stranded_windows_come_home(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        self.monitors = [dict(TV, focused=True, activeWorkspace={"id": 4}), HEADLESS]
+        stream.attach(self.st, {})
+        self.dispatch.assert_called_once_with('hl.dsp.focus({ workspace = "4" })')
+        self.assertEqual(stream.load_state()["homeWs"], 4)
+        # Big Picture opened on the parking workspace, a browser on one made mid-stream, a terminal on a real one.
+        self.workspaces = [{"id": 99, "monitor": "BS-STREAM"}, {"id": 7, "monitor": "BS-STREAM"},
+                           {"id": 4, "monitor": "HDMI-A-1"}]
+        self.clients = [{"address": "0xaa", "workspace": {"id": 99}}, {"address": "0xbb", "workspace": {"id": 7}},
+                        {"address": "0xcc", "workspace": {"id": 4}}]
+        self.monitors = [dict(TV, activeWorkspace={"id": 4}), dict(HEADLESS, activeWorkspace={"id": 7})]
+        self.dispatch.reset_mock()
+        stream.detach()
+        moved = [c.args[0] for c in self.dispatch.call_args_list]
+        self.assertEqual(moved[2:], ['hl.dsp.focus({ workspace = "99" })', 'hl.dsp.focus({ workspace = "4" })'])
+        self.assertEqual(moved[:2], [
+            'hl.dsp.window.move({ workspace = "4", follow = false, window = "address:0xaa" })',
+            'hl.dsp.window.move({ workspace = "4", follow = false, window = "address:0xbb" })'])
+
+    def test_windows_stay_put_when_there_is_no_real_display_to_return_to(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        self.monitors = [HEADLESS]  # TV off and unplugged
+        stream.attach(self.st, {})
+        self.workspaces = [{"id": 99, "monitor": "BS-STREAM"}]
+        self.clients = [{"address": "0xaa", "workspace": {"id": 99}}]
+        self.dispatch.reset_mock()
+        stream.detach()
+        self.dispatch.assert_not_called()
+
+    def test_window_addresses_are_validated(self):
+        mock.patch.stopall()
+        with self.assertRaises(hypr.HyprError):
+            hypr.move_window('0x1" }) os.exit() --', 1)
+
+    def test_detach_without_state_drops_an_overlay_that_still_blanks_the_tv(self):
+        from battlestation import paths
+        text = luagen.render_stream("BS-STREAM", "1280x800@60", attached=True, disable=["HDMI-A-1"], instance="sig_1")
+        paths.stream_lua().parent.mkdir(parents=True)
+        paths.stream_lua().write_text(text)
+        self.assertTrue(stream.detach()["recovered"])
+        self.assertIsNone(self.overlay())
+
+    def test_arm_keeps_a_live_stream_but_clears_a_stale_one(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        stream.attach(self.st, {})
+        self.assertTrue(stream.arm(self.st)["kept"])  # a plugin hot-reload must not end a game
+        self.assertTrue(stream.load_state()["attached"])
+        self.sig = "sig_2"  # compositor restarted
+        stream.arm(self.st)
+        self.assertFalse(stream.load_state()["attached"])
+        self.assertIn("parked", self.overlay())
+
+    def test_off_while_streaming_detaches_first_and_is_idempotent(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        stream.attach(self.st, {})
+        stream.set_enabled(False)
+        stream.disarm(self.st)
+        self.assertIsNone(self.overlay())
+        self.systemctl.assert_called_with("stop", self.st.unit)
+        self.remove.assert_called_once_with("BS-STREAM")
+        self.assertEqual(stream.load_state(), {})
+        self.unit["active"] = False
+        self.monitors = [TV]
+        self.assertEqual(stream.disarm(None), {"armed": False, "attached": False})
+
+    def test_watchdog_detaches_an_abandoned_stream_and_resumes_it(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        stream.attach(self.st, {"SUNSHINE_CLIENT_FPS": "90"})
+        self.assertEqual(stream.watchdog(self.st, now=1000)["action"], "none")
+        self.sessions.return_value = 0
+        self.assertEqual(stream.watchdog(self.st, now=1000)["action"], "waiting")
+        self.assertEqual(stream.watchdog(self.st, now=1000 + self.st.watchdog_idle_s)["action"], "detach")
+        self.assertIn("parked", self.overlay())
+        self.sessions.return_value = 1  # Moonlight resumed the paused app: Sunshine does not re-run `do`
+        self.assertEqual(stream.watchdog(self.st, now=1100)["action"], "attach")
+        self.assertIn('mode = "1280x800@90"', self.overlay())
+
+    def test_watchdog_never_attaches_on_its_own(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        self.assertEqual(stream.watchdog(self.st)["action"], "none")  # some other NVENC user, e.g. a recording
+        self.assertIn("parked", self.overlay())
+
+    def test_watchdog_detaches_when_sunshine_dies(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        stream.attach(self.st, {})
+        self.unit["active"] = False
+        self.assertEqual(stream.watchdog(self.st)["action"], "detach")
+
+    def test_scenes_ignore_the_virtual_output(self):
+        couch = STREAM_CFG.replace('label = "TV"', 'label = "TV"\ndisable_unlisted = true', 1)
+        text, res = scenes.render(cfg_from(couch).scene("tv-desktop"), scenes.real_monitors(cfg_from(couch)), caps_for)
+        self.assertEqual(res.disabled, [])
+        self.assertNotIn("BS-STREAM", text)
+        self.assertEqual([r.match for r in scenes.capture_rules(scenes.real_monitors(self.cfg), caps_for)],
+                         [f"desc:{TV_DESC}"])
+
+
+class SunshineConfTests(unittest.TestCase):
+    PREP = {"do": "/x/battlestation stream attach", "undo": "/x/battlestation stream detach", "elevated": "false"}
+    WANT = {"capture": "wlr", "encoder": "nvenc", "output_name": "BS-STREAM"}
+
+    def test_merge_keeps_foreign_settings_and_prep_commands(self):
+        text = ('# mine\nsunshine_name = den\ncapture = kms\n'
+                'global_prep_cmd = [{"do":"lights off","undo":"lights on"}]\n')
+        merged = sunshine.merge_conf(text, self.WANT, self.PREP)
+        conf = sunshine.parse_conf(merged)
+        self.assertIn("# mine", merged)
+        self.assertEqual((conf["sunshine_name"], conf["capture"], conf["output_name"]), ("den", "wlr", "BS-STREAM"))
+        entries = json.loads(conf["global_prep_cmd"])
+        self.assertEqual([e["do"] for e in entries], ["lights off", "/x/battlestation stream attach"])
+
+    def test_merge_is_idempotent_and_replaces_a_moved_cli(self):
+        once = sunshine.merge_conf("", self.WANT, self.PREP)
+        self.assertEqual(sunshine.merge_conf(once, self.WANT, self.PREP), once)
+        moved = dict(self.PREP, do="/y/battlestation stream attach")
+        entries = json.loads(sunshine.parse_conf(sunshine.merge_conf(once, self.WANT, moved))["global_prep_cmd"])
+        self.assertEqual([e["do"] for e in entries], ["/y/battlestation stream attach"])
+
+    def test_merge_refuses_a_prep_cmd_it_cannot_read(self):
+        with self.assertRaises(ValueError):
+            sunshine.merge_conf("global_prep_cmd = not json\n", self.WANT, self.PREP)
+
+    def test_missing_keys(self):
+        st = cfg_from(STREAM_CFG).stream
+        self.assertEqual(sunshine.missing_keys(st, None), ["capture", "encoder", "output_name", "global_prep_cmd"])
+        self.assertEqual(sunshine.missing_keys(st, sunshine.merge_conf("", sunshine.wanted_keys(st), self.PREP)), [])
+
+    def test_write_conf_preserves_mode(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}):
+            from battlestation import paths
+            paths.sunshine_conf().parent.mkdir(parents=True)
+            paths.sunshine_conf().write_text("sunshine_name = den\n")
+            os.chmod(paths.sunshine_conf(), 0o600)
+            st = cfg_from(STREAM_CFG).stream
+            self.assertTrue(sunshine.write_conf(st)["changed"])
+            self.assertFalse(sunshine.write_conf(st)["changed"])
+            self.assertEqual(paths.sunshine_conf().stat().st_mode & 0o777, 0o600)
+
+    def test_version_gate(self):
+        self.assertTrue(sunshine.version_ok("2026.914.233613-1"))
+        self.assertTrue(sunshine.version_ok("2027.101.1-1"))
+        self.assertFalse(sunshine.version_ok("2026.516.143833-4.1"))
+        self.assertFalse(sunshine.version_ok(""))
 
 
 if __name__ == "__main__":

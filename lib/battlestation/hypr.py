@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+from pathlib import Path
 
 CONNECTOR_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -13,9 +15,55 @@ class HyprError(RuntimeError):
     pass
 
 
-def _run(args: list[str], timeout: float = 5.0) -> str:
+# -- instance discovery ---------------------------------------------------------
+#
+# HYPRLAND_INSTANCE_SIGNATURE is inherited, and a process started from an older
+# session (or from Sunshine's prep-cmd) can carry one whose compositor is gone.
+# hyprctl then fails outright, so find the instance that is actually alive.
+
+_instance: str | None = None
+_instance_known = False
+
+
+def _instance_alive(path: Path) -> bool:
+    if not (path / ".socket.sock").exists():
+        return False
     try:
-        proc = subprocess.run(["hyprctl", *args], capture_output=True, text=True, timeout=timeout)
+        pid = int((path / "hyprland.lock").read_text(encoding="utf-8").split()[0])
+    except (OSError, ValueError, IndexError):
+        return False
+    return Path(f"/proc/{pid}").exists()
+
+
+def discover_instance(runtime: Path | None = None) -> str | None:
+    """The inherited signature if its compositor is alive, else the newest live one."""
+    if runtime is None:
+        base = os.environ.get("XDG_RUNTIME_DIR", "").strip() or f"/run/user/{os.getuid()}"
+        runtime = Path(base) / "hypr"
+    inherited = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "").strip()
+    if inherited and _instance_alive(runtime / inherited):
+        return inherited
+    try:
+        candidates = [p for p in runtime.iterdir() if p.is_dir() and _instance_alive(p)]
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime).name
+
+
+def instance_signature() -> str | None:
+    global _instance, _instance_known
+    if not _instance_known:
+        _instance, _instance_known = discover_instance(), True
+    return _instance
+
+
+def _run(args: list[str], timeout: float = 5.0) -> str:
+    sig = instance_signature()
+    argv = ["hyprctl", *(["-i", sig] if sig else []), *args]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise HyprError(f"hyprctl {' '.join(args)}: {exc}") from exc
     if proc.returncode != 0:
@@ -39,6 +87,21 @@ def clients() -> list[dict]:
     return _json(["clients"])
 
 
+def workspaces() -> list[dict]:
+    return _json(["workspaces"])
+
+
+def focus_workspace(workspace: int) -> None:
+    dispatch(f'hl.dsp.focus({{ workspace = "{int(workspace)}" }})')
+
+
+def move_window(address: str, workspace: int) -> None:
+    """Move a window to a workspace without following it there."""
+    if not re.match(r"^0x[0-9a-fA-F]+$", str(address)):
+        raise HyprError(f"unsafe window address {address!r}")
+    dispatch(f'hl.dsp.window.move({{ workspace = "{int(workspace)}", follow = false, window = "address:{address}" }})')
+
+
 def reload() -> None:
     _run(["reload"])
 
@@ -51,6 +114,19 @@ def config_errors() -> list[str]:
     if isinstance(data, list):
         return [str(e) for e in data if str(e).strip()]
     return []
+
+
+def create_headless(name: str) -> None:
+    """Add a compositor-side virtual output. It lasts until removed or the session ends."""
+    if not CONNECTOR_RE.match(name):
+        raise HyprError(f"unsafe output name {name!r}")
+    _run(["output", "create", "headless", name])
+
+
+def remove_output(name: str) -> None:
+    if not CONNECTOR_RE.match(name):
+        raise HyprError(f"unsafe output name {name!r}")
+    _run(["output", "remove", name])
 
 
 def eval_lua(code: str) -> str:

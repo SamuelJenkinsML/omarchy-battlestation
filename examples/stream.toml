@@ -1,0 +1,10 @@
+# Streaming host: add this to ~/.config/battlestation/config.toml.
+# Then: battlestation setup stream, and flip the switch in the panel.
+
+[stream]
+default_mode = "1280x800@60"   # Steam Deck native; used when the client does not say
+max_fps = 90                   # Deck OLED tops out at 90
+
+# Optional. Commands run with `bash -lc` when a client takes over / leaves.
+# on_attach = ["battlestation bigpicture"]   # open Steam Big Picture for the client
+# on_detach = []
