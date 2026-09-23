@@ -179,6 +179,24 @@ Item {
     onTriggered: if (!watchdogProc.running && !streamProc.running) watchdogProc.running = true
   }
 
+  // A display that goes away hands its workspaces and focus to whatever is
+  // left, the parked virtual output included, and a TV back from standby does
+  // not get them all back.
+  Process {
+    id: settleProc
+    command: [root.cli, "stream", "settle"]
+  }
+
+  Timer {
+    id: settleDebounce
+    interval: 1000
+    // A scene switch settles by itself, and arm is the one creating the output.
+    onTriggered: {
+      if (actionProc.running || streamProc.running) restart()
+      else if (!settleProc.running) settleProc.running = true
+    }
+  }
+
   // ---- scene actions ----
   Process {
     id: actionProc
@@ -318,6 +336,7 @@ Item {
   DisplayState {
     id: displayState
     cli: root.cli
+    onOutputsChanged: if (root.streamEnabled && !root.streamAttached) settleDebounce.restart()
     onTopologyChanged: {
       // Attaching a stream switches the displays off, which is not a hotplug.
       if (root.sceneState.autoSceneOnHotplug && !root.pendingRevert && !root.busy && !root.streamAttached)
