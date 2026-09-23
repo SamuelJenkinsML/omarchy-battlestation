@@ -179,8 +179,9 @@ Item {
     onTriggered: if (!watchdogProc.running && !streamProc.running) watchdogProc.running = true
   }
 
-  // A TV in standby drops off HDMI and Hyprland hands its workspaces to the
-  // parked virtual output; not all of them come back when the TV does.
+  // A display that goes away hands its workspaces and focus to whatever is
+  // left, the parked virtual output included, and a TV back from standby does
+  // not get them all back.
   Process {
     id: settleProc
     command: [root.cli, "stream", "settle"]
@@ -335,7 +336,7 @@ Item {
   DisplayState {
     id: displayState
     cli: root.cli
-    onOutputAdded: if (root.streamEnabled && !root.streamAttached) settleDebounce.restart()
+    onOutputsChanged: if (root.streamEnabled && !root.streamAttached) settleDebounce.restart()
     onTopologyChanged: {
       // Attaching a stream switches the displays off, which is not a hotplug.
       if (root.sceneState.autoSceneOnHotplug && !root.pendingRevert && !root.busy && !root.streamAttached)
