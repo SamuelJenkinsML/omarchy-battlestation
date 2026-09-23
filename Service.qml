@@ -179,6 +179,23 @@ Item {
     onTriggered: if (!watchdogProc.running && !streamProc.running) watchdogProc.running = true
   }
 
+  // A TV in standby drops off HDMI and Hyprland hands its workspaces to the
+  // parked virtual output; not all of them come back when the TV does.
+  Process {
+    id: settleProc
+    command: [root.cli, "stream", "settle"]
+  }
+
+  Timer {
+    id: settleDebounce
+    interval: 1000
+    // A scene switch settles by itself, and arm is the one creating the output.
+    onTriggered: {
+      if (actionProc.running || streamProc.running) restart()
+      else if (!settleProc.running) settleProc.running = true
+    }
+  }
+
   // ---- scene actions ----
   Process {
     id: actionProc
@@ -318,6 +335,7 @@ Item {
   DisplayState {
     id: displayState
     cli: root.cli
+    onOutputAdded: if (root.streamEnabled && !root.streamAttached) settleDebounce.restart()
     onTopologyChanged: {
       // Attaching a stream switches the displays off, which is not a hotplug.
       if (root.sceneState.autoSceneOnHotplug && !root.pendingRevert && !root.busy && !root.streamAttached)

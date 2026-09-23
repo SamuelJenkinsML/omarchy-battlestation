@@ -394,6 +394,29 @@ class ReclaimTests(unittest.TestCase):
         scenes.reclaim_from_virtual("BS-STREAM")
         self.assertEqual(self.calls, [])
 
+    def test_a_settled_desktop_dispatches_nothing(self):
+        # Runs on every display hotplug: a redundant focus would flip back and
+        # forth under workspace_back_and_forth, and each dispatch is a hyprctl.
+        self.monitors = [dict(UW, focused=True, activeWorkspace={"id": 1}),
+                         dict(HEADLESS, focused=False, activeWorkspace={"id": 99})]
+        with mock.patch("battlestation.hypr.workspaces", return_value=[
+                {"id": 1, "monitor": "DP-1", "windows": 1}, {"id": 99, "monitor": "BS-STREAM", "windows": 0}]), \
+                mock.patch("battlestation.hypr.clients") as clients:
+            self.assertFalse(scenes.reclaim_from_virtual("BS-STREAM"))
+            clients.assert_not_called()
+        self.assertEqual(self.calls, [])
+
+    def test_focus_left_on_the_parked_output_comes_back(self):
+        self.monitors = [dict(UW, focused=False, activeWorkspace={"id": 1}),
+                         dict(HEADLESS, focused=True, activeWorkspace={"id": 99})]
+        with mock.patch("battlestation.hypr.workspaces", return_value=[
+                {"id": 1, "monitor": "DP-1", "windows": 1}, {"id": 99, "monitor": "BS-STREAM", "windows": 0}]):
+            self.assertTrue(scenes.reclaim_from_virtual("BS-STREAM"))
+        self.assertEqual(self.calls, [("focus_workspace", 1)])
+
+    def test_reports_that_it_moved_something(self):
+        self.assertTrue(scenes.reclaim_from_virtual("BS-STREAM"))
+
 
 class InstanceTests(unittest.TestCase):
     def setUp(self):
@@ -626,6 +649,70 @@ class StreamTests(unittest.TestCase):
         self.dispatch.reset_mock()
         stream.detach()
         self.dispatch.assert_not_called()
+
+    def _stranded_after_tv_reconnect(self):
+        # The TV dropped out, Hyprland handed workspace 3 to the parked output,
+        # and the TV came back without it.
+        self.monitors = [dict(TV, focused=True, activeWorkspace={"id": 2}),
+                         dict(HEADLESS, x=20000, focused=False, activeWorkspace={"id": 3})]
+        self.workspaces = [{"id": 2, "monitor": "HDMI-A-1", "windows": 2},
+                           {"id": 3, "monitor": "BS-STREAM", "windows": 1},
+                           {"id": 99, "monitor": "BS-STREAM", "windows": 0}]
+
+    def test_settle_brings_stranded_workspaces_home_and_finds_the_pointer(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        self._stranded_after_tv_reconnect()
+        self.dispatch.reset_mock()
+        with mock.patch("battlestation.hypr.cursor_pos", return_value=(20100, 50)):
+            result = stream.settle()
+        self.assertTrue(result["moved"])
+        self.assertEqual([c.args[0] for c in self.dispatch.call_args_list], [
+            'hl.dsp.focus({ workspace = "99" })',
+            'hl.dsp.workspace.move({ workspace = "3", monitor = "HDMI-A-1" })',
+            'hl.dsp.focus({ workspace = "2" })',
+            'hl.dsp.cursor.move({ x = 1920, y = 1080 })'])
+
+    def test_settle_on_a_settled_desktop_touches_nothing(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        self.monitors = [dict(TV, focused=True, activeWorkspace={"id": 2}),
+                         dict(HEADLESS, x=20000, focused=False, activeWorkspace={"id": 99})]
+        self.workspaces = [{"id": 2, "monitor": "HDMI-A-1", "windows": 2},
+                           {"id": 99, "monitor": "BS-STREAM", "windows": 0}]
+        self.dispatch.reset_mock()
+        with mock.patch("battlestation.hypr.cursor_pos", return_value=(900, 1800)):
+            self.assertFalse(stream.settle()["moved"])
+        self.dispatch.assert_not_called()
+
+    def test_settle_leaves_a_live_stream_alone(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        stream.attach(self.st, {})
+        self.monitors = [dict(HEADLESS, focused=True, activeWorkspace={"id": 2})]
+        self.dispatch.reset_mock()
+        self.assertEqual(stream.settle()["skipped"], "attached")
+        self.dispatch.assert_not_called()
+
+    def test_settle_without_a_virtual_output_does_nothing(self):
+        self._stranded_after_tv_reconnect()
+        self.assertEqual(stream.settle()["skipped"], "not armed")
+        self.dispatch.assert_not_called()
+
+    def test_settle_needs_no_config(self):
+        # The shell runs it on every hotplug; a broken config must not stop it.
+        import contextlib
+        import io
+        from battlestation import cli, paths
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        paths.config_file().parent.mkdir(parents=True, exist_ok=True)
+        paths.config_file().write_text("not [valid toml")
+        self._stranded_after_tv_reconnect()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), mock.patch("battlestation.hypr.cursor_pos", return_value=(0, 0)):
+            self.assertEqual(cli.main(["stream", "settle"]), 0)
+        self.assertEqual(json.loads(buf.getvalue()), {"ok": True, "settled": True, "moved": True})
 
     def test_window_addresses_are_validated(self):
         mock.patch.stopall()

@@ -299,6 +299,9 @@ def cmd_stream(args) -> int:
         except Exception as exc:  # noqa: BLE001 - report, never fail the undo
             out({"ok": False, "error": str(exc)})
         return 0
+    if action == "settle":
+        out({"ok": True, **stream.settle()})
+        return 0
     if action == "off":
         stream.set_enabled(False)
         try:
@@ -462,9 +465,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("bigpicture", help="open Steam Big Picture").set_defaults(func=cmd_steam)
 
     st = sub.add_parser("stream", help="headless streaming host: on, off, status, detach")
-    st.add_argument("action", choices=["on", "off", "status", "detach", "arm", "disarm", "attach", "watchdog"],
+    st.add_argument("action", choices=["on", "off", "status", "detach", "arm", "disarm", "attach", "watchdog",
+                                        "settle"],
                     help="on/off switch the feature; detach gives the desktop back; "
-                         "arm, disarm, attach and watchdog are (internal)")
+                         "arm, disarm, attach, watchdog and settle are (internal)")
     st.add_argument("--reason", default="")
     st.set_defaults(func=cmd_stream)
 

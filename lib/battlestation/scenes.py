@@ -174,38 +174,53 @@ def reload_checked(target, previous: str | None, what: str = "scene") -> None:
         raise SceneError(f"Hyprland rejected the {what}, rolled back: " + "; ".join(errors))
 
 
-def reclaim_from_virtual(output: str = "BS-STREAM") -> None:
-    """Take back what Hyprland parked on the virtual stream output.
+def reclaim_from_virtual(output: str = "BS-STREAM") -> bool:
+    """Take back what Hyprland parked on the virtual stream output. True if it did.
 
-    When a scene switches a display off, Hyprland moves that display's
-    workspaces (and focus) to another output, and the parked virtual output is
-    as good a candidate as any. Its workspaces then sit 20000 pixels off-screen:
-    SUPER+2 jumps there, the pointer vanishes and new windows open where nobody
-    can see them. Only the parking workspace belongs there, and it stays empty
-    until a client attaches.
+    When a display goes away (a scene switches it off, or the TV drops off HDMI
+    in standby), Hyprland moves its workspaces (and focus) to another output,
+    and the parked virtual output is as good a candidate as any. Its workspaces
+    then sit 20000 pixels off-screen: SUPER+2 jumps there, the pointer vanishes
+    and new windows open where nobody can see them. Only the parking workspace
+    belongs there, and it stays empty until a client attaches.
+
+    Runs on every hotplug, so a settled desktop costs two reads and no dispatch.
     """
     try:
         mons = hypr.monitors(include_disabled=False)
         virtual = next((m for m in mons if m.get("name") == output), None)
         real = [m for m in mons if m.get("name") != output]
         if virtual is None or not real:
-            return  # not streaming-capable, or attached (every real display is off)
+            return False  # not streaming-capable, or attached (every real display is off)
         home = next((m for m in real if m.get("focused")), real[0])
         home_ws = int((home.get("activeWorkspace") or {}).get("id") or 0)
         park = luagen.PARK_WORKSPACE
-        if int((virtual.get("activeWorkspace") or {}).get("id") or 0) != park:
-            hypr.focus_workspace(park)  # bound to the virtual output by the stream overlay
+        showing = int((virtual.get("activeWorkspace") or {}).get("id") or 0)
+        stranded, parked_windows = [], False
         for ws in hypr.workspaces():
             wid = int(ws.get("id") or 0)
-            if ws.get("monitor") == output and wid > 0 and wid != park:
-                hypr.move_workspace(wid, str(home["name"]))
+            if ws.get("monitor") != output:
+                continue
+            if wid == park:
+                parked_windows = int(ws.get("windows", 1)) > 0
+            elif wid > 0:
+                stranded.append(wid)
+        if not stranded and not parked_windows and showing == park and not virtual.get("focused"):
+            return False
+
+        if showing != park:
+            hypr.focus_workspace(park)  # bound to the virtual output by the stream overlay
+        for wid in stranded:
+            hypr.move_workspace(wid, str(home["name"]))
         if home_ws > 0:
-            for client in hypr.clients():
-                if (client.get("workspace") or {}).get("id") == park:
-                    hypr.move_window(str(client.get("address")), home_ws)
+            if parked_windows:
+                for client in hypr.clients():
+                    if (client.get("workspace") or {}).get("id") == park:
+                        hypr.move_window(str(client.get("address")), home_ws)
             hypr.focus_workspace(home_ws)
+        return True
     except (hypr.HyprError, KeyError, TypeError, ValueError):
-        pass
+        return False
 
 
 def settle_desktop(output: str = "BS-STREAM") -> None:
@@ -214,14 +229,19 @@ def settle_desktop(output: str = "BS-STREAM") -> None:
     recover_cursor(output)
 
 
-def recover_cursor(skip: str = "BS-STREAM") -> None:
+def recover_cursor(skip: str = "BS-STREAM", only_if_lost: bool = False) -> None:
     """Warp the pointer to the middle of the focused output after a layout change.
 
     On NVIDIA the hardware cursor can stay invisible after a modeset until
     something warps it (a workspace switch does, via warp_on_change_workspace).
+    only_if_lost leaves a pointer that is already on a real display where it is.
     """
     try:
         mons = [m for m in hypr.monitors(include_disabled=False) if m.get("name") != skip]
+        if only_if_lost:
+            x, y = hypr.cursor_pos()
+            if any(_contains(m, x, y) for m in mons):
+                return
         mon = next((m for m in mons if m.get("focused")), mons[0] if mons else None)
         if mon:
             scale = float(mon.get("scale") or 1) or 1
@@ -229,6 +249,12 @@ def recover_cursor(skip: str = "BS-STREAM") -> None:
                              int(mon["y"] + mon["height"] / scale / 2))
     except (hypr.HyprError, KeyError, TypeError, ValueError):
         pass
+
+
+def _contains(mon: dict, x: int, y: int) -> bool:
+    scale = float(mon.get("scale") or 1) or 1
+    left, top = mon["x"], mon["y"]
+    return left <= x < left + mon["width"] / scale and top <= y < top + mon["height"] / scale
 
 
 def _write_scene_file(text: str | None) -> None:

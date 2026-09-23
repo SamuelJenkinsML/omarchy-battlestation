@@ -394,6 +394,26 @@ def _detach_locked(state: dict, reason: str, resumable: bool = False) -> dict:
     return {"attached": False, "changed": True, "reason": reason}
 
 
+def settle() -> dict:
+    """After a display comes back: nothing left on the parked output.
+
+    A TV in standby drops off HDMI, the virtual output is then the only one
+    left, and Hyprland does not always hand every workspace back on reconnect.
+    Reads the runtime state, never the config: the shell runs it on every
+    hotplug. Under the lock so it cannot race detach bringing windows home.
+    """
+    with _locked():
+        state = load_state()
+        if state.get("attached"):
+            return {"settled": False, "skipped": "attached"}
+        if not state.get("armed"):
+            return {"settled": False, "skipped": "not armed"}
+        output = state.get("output") or "BS-STREAM"
+        moved = scenes.reclaim_from_virtual(output)
+        scenes.recover_cursor(output, only_if_lost=not moved)
+        return {"settled": True, "moved": moved}
+
+
 # -- watchdog and status -------------------------------------------------------------
 
 

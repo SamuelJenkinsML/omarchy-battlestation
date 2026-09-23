@@ -108,6 +108,14 @@ def move_workspace(workspace: int, monitor: str) -> None:
     dispatch(f'hl.dsp.workspace.move({{ workspace = "{int(workspace)}", monitor = {lua_str(monitor)} }})')
 
 
+def cursor_pos() -> tuple[int, int]:
+    data = _json(["cursorpos"])
+    try:
+        return int(data["x"]), int(data["y"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HyprError(f"hyprctl cursorpos returned {data!r}") from exc
+
+
 def warp_cursor(x: int, y: int) -> None:
     dispatch(f"hl.dsp.cursor.move({{ x = {int(x)}, y = {int(y)} }})")
 
