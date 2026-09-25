@@ -150,7 +150,7 @@ and pair Moonlight with the PIN it shows.
 | State | What is true |
 | --- | --- |
 | **Off** | No virtual display, Sunshine stopped, no ports listening. The default. |
-| **Ready** | Virtual display parked off to the side on workspace 99; Sunshine running. |
+| **Ready** | Virtual display created but switched off, so games and XWayland never see it; Sunshine running. If no real display is on (TV off or unplugged) it is lit off to the side on workspace 99 instead, because Sunshine needs an output to probe the encoder before a client can connect. |
 | **Streaming** | A client connected: the virtual display takes the client's resolution, the real displays switch off and your workspaces move over. They move back when it leaves. |
 
 ```toml

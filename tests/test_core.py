@@ -503,9 +503,17 @@ class StreamConfigTests(unittest.TestCase):
 
 
 class StreamLuaTests(unittest.TestCase):
-    def test_parked_touches_nothing_else(self):
+    def test_parked_switches_the_output_off(self):
+        # Lit, XWayland packs it in at the origin and Wine games take it for the primary display.
         text = luagen.render_stream("BS-STREAM", "1280x800@60")
         self.assertIn("Stream overlay: parked", text)
+        self.assertIn('hl.monitor({ output = "BS-STREAM", disabled = true })', text)
+        self.assertNotIn("1280x800", text)
+        self.assertNotIn("os.getenv", text)
+
+    def test_standby_lights_it_out_of_the_way_and_touches_nothing_else(self):
+        text = luagen.render_stream("BS-STREAM", "1280x800@60", standby=True)
+        self.assertIn("Stream overlay: parked, standby", text)
         self.assertIn('position = "20000x0"', text)
         self.assertIn('hl.workspace_rule({ workspace = "99", monitor = "BS-STREAM", default = true })', text)
         self.assertNotIn("disabled", text)
@@ -764,6 +772,7 @@ class StreamTests(unittest.TestCase):
         stream.arm(self.st)
         stream.attach(self.st, {})
         stream.set_enabled(False)
+        self.remove.side_effect = lambda name: self.assertIsNone(self.overlay())  # never while its rule still switches it off
         stream.disarm(self.st)
         self.assertIsNone(self.overlay())
         self.systemctl.assert_called_with("stop", self.st.unit)
@@ -791,6 +800,46 @@ class StreamTests(unittest.TestCase):
         stream.arm(self.st)
         self.assertEqual(stream.watchdog(self.st)["action"], "none")  # some other NVENC user, e.g. a recording
         self.assertIn("parked", self.overlay())
+
+    def test_arm_gives_focus_back_after_creating_the_output(self):
+        stream.set_enabled(True)
+        self.monitors = [dict(TV, focused=True, activeWorkspace={"id": 2})]
+        self.create.side_effect = lambda name: setattr(self, "monitors", [
+            dict(TV, focused=False, activeWorkspace={"id": 1}), dict(HEADLESS, disabled=True, focused=True)])
+        stream.arm(self.st)
+        self.dispatch.assert_called_once_with('hl.dsp.focus({ workspace = "2" })')
+
+    def test_parked_output_is_off_while_a_real_display_is_on(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        self.assertIn('hl.monitor({ output = "BS-STREAM", disabled = true })', self.overlay())
+        self.dispatch.assert_not_called()  # no hop to the parking workspace of an output that is off
+
+    def test_standby_follows_the_real_displays(self):
+        stream.set_enabled(True)
+        self.monitors = [dict(TV, disabled=True), dict(HEADLESS, disabled=True)]  # TV switched off
+        stream.arm(self.st)
+        self.assertIn("parked, standby", self.overlay())  # Sunshine's encoder probe needs an output
+        self.monitors = [TV, HEADLESS]  # TV back
+        self.assertEqual(stream.watchdog(self.st)["action"], "none")
+        self.assertIn("disabled = true", self.overlay())
+        self.monitors = [dict(HEADLESS, disabled=True)]  # TV unplugged
+        stream.watchdog(self.st)
+        self.assertIn("parked, standby", self.overlay())
+
+    def test_detach_parks_off_only_if_a_real_display_comes_back(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        stream.attach(self.st, {})
+        self.monitors = [dict(TV, disabled=True), HEADLESS]  # what attach did
+        stream.attach(self.st, {})  # a repeated `do` must not forget the TV was on
+        stream.detach()
+        self.assertIn("disabled = true", self.overlay())
+        self.assertNotIn("standby", self.overlay())
+        self.monitors = [HEADLESS]  # TV unplugged: nothing else for Sunshine to probe
+        stream.attach(self.st, {})
+        stream.detach()
+        self.assertIn("parked, standby", self.overlay())
 
     def test_watchdog_detaches_when_sunshine_dies(self):
         stream.set_enabled(True)

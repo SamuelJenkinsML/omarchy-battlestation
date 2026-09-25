@@ -4,7 +4,7 @@ Sunshine (`capture = wlr`) streams a Hyprland headless output, so streaming
 works with the TV off, unplugged or in the wrong mode. Three states:
 
   off       no virtual output, Sunshine stopped, nothing listening
-  armed     virtual output parked out of the way, Sunshine running
+  armed     virtual output parked (switched off), Sunshine running
   attached  a client is connected: the virtual output takes the client's mode
             and the real displays are switched off, so the desktop moves over
 
@@ -12,9 +12,12 @@ attach/detach are Sunshine's global prep-cmd do/undo. Everything detach needs
 is kept in the runtime state file, so it works with a broken config: a bad
 config must never be able to leave the TV dark.
 
-Sunshine documents wlr capture of Hyprland virtual outputs; creating the output
-before Sunshine starts and resizing it from the prep-cmd is the approach the
-community settled on for it.
+Sunshine documents wlr capture of Hyprland virtual outputs. It looks the output
+up again for every session, after the prep-cmd has run, so the parked output
+stays switched off and attach turns it on. Switched on, XWayland would count it
+as a monitor and Wine games would take it for the primary one. The exception is
+standby: with no real display on, Sunshine's encoder probe (which runs before
+the prep-cmd) needs some output to open, so the parked one is lit off to the side.
 """
 
 from __future__ import annotations
@@ -132,6 +135,14 @@ def encoder_sessions() -> int | None:
         return None
 
 
+def _real_display_on(output: str, monitors: list[dict]) -> bool:
+    return any(m.get("name") != output and not m.get("disabled") for m in monitors)
+
+
+def _parked_overlay(output: str, mode: str, scale: float, standby: bool) -> str:
+    return luagen.render_stream(output, mode, scale, standby=standby)
+
+
 def _output(name: str, monitors: list[dict] | None = None) -> dict | None:
     for mon in hypr.monitors() if monitors is None else monitors:
         if mon.get("name") == name:
@@ -167,6 +178,11 @@ def _home_workspace(monitors: list[dict], output: str) -> int | None:
     return None
 
 
+def _active_workspace(monitors: list[dict]) -> int:
+    focused = next((m for m in monitors if m.get("focused") and not m.get("disabled")), None)
+    return int(((focused or {}).get("activeWorkspace") or {}).get("id") or 0)
+
+
 def _bring_windows_home(output: str, home_ws) -> None:
     """After the real displays are back, nothing may be left on the virtual one.
 
@@ -194,7 +210,7 @@ def _park_workspace(output: str, home_ws: int, monitors: list[dict]) -> None:
     one (say 3), SUPER+3 on the real display would jump to a screen nobody can see."""
     mon = _output(output, monitors)
     showing = int(((mon or {}).get("activeWorkspace") or {}).get("id") or 0)
-    if mon is None or showing == luagen.PARK_WORKSPACE:
+    if mon is None or mon.get("disabled") or showing == luagen.PARK_WORKSPACE:
         return
     hypr.focus_workspace(luagen.PARK_WORKSPACE)  # bound to the virtual output by the overlay's workspace rule
     hypr.focus_workspace(home_ws)
@@ -231,7 +247,9 @@ def arm(st: StreamConfig) -> dict:
             _detach_locked(state, reason)
             state = load_state()
 
-        _apply_overlay(luagen.render_stream(st.output, st.default_mode, st.scale))
+        before = hypr.monitors()
+        _apply_overlay(_parked_overlay(st.output, st.default_mode, st.scale,
+                                       standby=not _real_display_on(st.output, before)))
         created = False
         if _output(st.output) is None:
             hypr.create_headless(st.output)  # the workspace rule is already in place, so it starts on its own workspace
@@ -249,9 +267,11 @@ def arm(st: StreamConfig) -> dict:
 
         try:
             mons = hypr.monitors()
-            home = _home_workspace(mons, st.output)
+            home = _home_workspace(before, st.output) or _home_workspace(mons, st.output)
             if home:
                 _park_workspace(st.output, home, mons)
+                if created and _active_workspace(mons) != home:
+                    hypr.focus_workspace(home)  # a new output takes focus, even one its rule switches straight off
         except hypr.HyprError:
             pass
         state.update({"armed": True, "attached": False, "output": st.output, "parkedMode": st.default_mode,
@@ -272,12 +292,14 @@ def disarm(st: StreamConfig | None = None) -> dict:
         manage = st.manage_unit if st else True
         if manage and unit and unit_state(unit)["active"]:
             _systemctl("stop", unit)
+        # Overlay first: Hyprland ignores `output remove` for a switched-off
+        # output, which would then come back as an empty monitor on the reload.
+        _apply_overlay(None)
         try:
             if _output(output) is not None:
                 hypr.remove_output(output)
         except hypr.HyprError:
             pass
-        _apply_overlay(None)
         try:
             paths.stream_state().unlink()
         except FileNotFoundError:
@@ -320,10 +342,13 @@ def _attach_locked(st: StreamConfig, mode: str) -> dict:
         hypr.create_headless(st.output)
     disable = [str(m.get("name")) for m in monitors
                if m.get("name") != st.output and hypr.CONNECTOR_RE.match(str(m.get("name") or ""))]
+    real_on = _real_display_on(st.output, monitors)
 
     state = load_state()
     idle_was_set = state.get("idleWasSet") if state.get("attached") else _stay_awake_flag()
     home_ws = state.get("homeWs") if state.get("attached") else _home_workspace(monitors, st.output)
+    if state.get("attached"):
+        real_on = bool(state.get("realOn", True))  # the real displays are already off by now
     _apply_overlay(luagen.render_stream(st.output, mode, st.scale, attached=True, disable=disable, instance=instance))
     # The workspaces have moved over, but the virtual output is still showing
     # its own empty parking workspace. Show the client the desktop instead,
@@ -342,7 +367,7 @@ def _attach_locked(st: StreamConfig, mode: str) -> dict:
         "scale": st.scale, "unit": st.unit, "unitPid": unit_state(st.unit)["pid"], "instance": instance,
         "disabled": disable, "attachedAt": int(time.time()), "idleWasSet": bool(idle_was_set),
         "idleSetByUs": set_idle or bool(state.get("idleSetByUs")), "onDetach": list(st.on_detach),
-        "homeWs": home_ws,
+        "homeWs": home_ws, "realOn": real_on,
     })
     state.pop("idleSince", None)
     state.pop("resumable", None)
@@ -370,8 +395,9 @@ def _detach_locked(state: dict, reason: str, resumable: bool = False) -> dict:
 
     output = state.get("output") or "BS-STREAM"
     try:
-        _apply_overlay(luagen.render_stream(output, state.get("parkedMode") or "1920x1080@60",
-                                            float(state.get("scale") or 1.0)))
+        # Standby only if no real display was on to come back; the watchdog corrects a wrong guess.
+        _apply_overlay(_parked_overlay(output, state.get("parkedMode") or "1920x1080@60",
+                                       float(state.get("scale") or 1.0), standby=not state.get("realOn", True)))
     except (StreamError, hypr.HyprError):
         scenes.write_overlay(paths.stream_lua(), None)  # last resort: Hyprland reloads on the change by itself
     _bring_windows_home(output, state.get("homeWs"))
@@ -380,7 +406,7 @@ def _detach_locked(state: dict, reason: str, resumable: bool = False) -> dict:
     hooks = [c for c in state.get("onDetach") or [] if isinstance(c, str)]
     last_mode = state.get("mode")
     for key in ("mode", "disabled", "attachedAt", "idleWasSet", "idleSetByUs", "onDetach", "idleSince", "unitPid",
-                "homeWs"):
+                "homeWs", "realOn"):
         state.pop(key, None)
     state["attached"] = False
     state["lastDetach"] = {"reason": reason, "at": int(time.time())}
@@ -438,8 +464,22 @@ def watchdog(st: StreamConfig, now: float | None = None) -> dict:
             return {"action": "none", "sessions": sessions}
         if state.get("resumable") and sessions and unit_state(st.unit)["active"]:
             return {"action": "attach", **_attach_locked(st, str(state["resumable"]))}
+        if state.get("armed") and is_enabled():
+            _standby_follows_displays(st)
         return {"action": "none", "sessions": sessions}
 
+
+def _standby_follows_displays(st: StreamConfig) -> None:
+    """Parked: lit only while no real display is on (the TV was switched off or
+    unplugged), switched off again as soon as one is back."""
+    try:
+        monitors = hypr.monitors()
+        if _output(st.output, monitors) is None:
+            return
+        _apply_overlay(_parked_overlay(st.output, st.default_mode, st.scale,
+                                       standby=not _real_display_on(st.output, monitors)))
+    except (StreamError, hypr.HyprError):
+        pass  # the next tick tries again
 
 
 def status(st: StreamConfig) -> dict:

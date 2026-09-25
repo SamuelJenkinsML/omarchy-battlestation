@@ -349,11 +349,15 @@ Item {
   DisplayState {
     id: displayState
     cli: root.cli
+    ignoreOutput: root.stream.output || ""
     onOutputsChanged: if (root.streamEnabled && !root.streamAttached) settleDebounce.restart()
     onTopologyChanged: {
       // Attaching a stream switches the displays off, which is not a hotplug.
-      if (root.sceneState.autoSceneOnHotplug && !root.pendingRevert && !root.busy && !root.streamAttached)
+      if (root.streamAttached) return
+      if (root.sceneState.autoSceneOnHotplug && !root.pendingRevert && !root.busy)
         root.run("Matching scene", ["scene", "auto"])
+      // TV gone: light the parked stream output for Sunshine; TV back: switch it off.
+      if (root.streamEnabled) root.runStream("", ["arm"])
     }
   }
 
