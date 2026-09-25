@@ -10,7 +10,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
-from battlestation import config, drmprops, edid, hypr, live, luagen, mangohud, pad, scenes, stream, sunshine, tailscale, tv, ws  # noqa: E402
+from battlestation import config, drmprops, edid, hypr, live, luagen, mangohud, pad, scenes, stream, sunshine, tailscale, tv, ws, xwayland  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures"
 TV_DESC = "Samsung Electric Company SAMSUNG 0x01000E00"
@@ -503,17 +503,10 @@ class StreamConfigTests(unittest.TestCase):
 
 
 class StreamLuaTests(unittest.TestCase):
-    def test_parked_switches_the_output_off(self):
-        # Lit, XWayland packs it in at the origin and Wine games take it for the primary display.
+    def test_parked_touches_nothing_else(self):
+        # Lit on purpose: switched off, a TV dropping off HDMI leaves Hyprland with no output at all.
         text = luagen.render_stream("BS-STREAM", "1280x800@60")
         self.assertIn("Stream overlay: parked", text)
-        self.assertIn('hl.monitor({ output = "BS-STREAM", disabled = true })', text)
-        self.assertNotIn("1280x800", text)
-        self.assertNotIn("os.getenv", text)
-
-    def test_standby_lights_it_out_of_the_way_and_touches_nothing_else(self):
-        text = luagen.render_stream("BS-STREAM", "1280x800@60", standby=True)
-        self.assertIn("Stream overlay: parked, standby", text)
         self.assertIn('position = "20000x0"', text)
         self.assertIn('hl.workspace_rule({ workspace = "99", monitor = "BS-STREAM", default = true })', text)
         self.assertNotIn("disabled", text)
@@ -560,6 +553,10 @@ class StreamTests(unittest.TestCase):
         mock.patch("battlestation.edid.read_caps", side_effect=caps_for).start()
         mock.patch("battlestation.scenes.edid.read_caps", side_effect=caps_for).start()
         mock.patch("time.sleep").start()
+        self.xprimary = None
+        mock.patch("battlestation.xwayland.primary", side_effect=lambda: self.xprimary).start()
+        self.set_primary = mock.patch("battlestation.xwayland.set_primary",
+                                      side_effect=lambda name, wait=1.0: setattr(self, "xprimary", name) or True).start()
         self.sig = "sig_1"
         self.cfg = cfg_from(STREAM_CFG)
         self.st = self.cfg.stream
@@ -714,6 +711,51 @@ class StreamTests(unittest.TestCase):
             self.assertFalse(stream.settle()["moved"])
         self.dispatch.assert_not_called()
 
+    def test_arm_gives_focus_back_after_creating_the_output(self):
+        stream.set_enabled(True)
+        self.monitors = [dict(TV, focused=True, activeWorkspace={"id": 2})]
+        self.create.side_effect = lambda name: setattr(self, "monitors", [
+            dict(TV, focused=False, activeWorkspace={"id": 2}),
+            dict(HEADLESS, x=20000, focused=True, activeWorkspace={"id": 99})])
+        stream.arm(self.st)
+        self.assertEqual(self.dispatch.call_args_list[-1].args[0], 'hl.dsp.focus({ workspace = "2" })')
+
+    def test_arm_keeps_the_real_display_primary(self):
+        # Lit, the parked output is a monitor to XWayland; Wine must not take it for the main one.
+        stream.set_enabled(True)
+        self.xprimary = "BS-STREAM"
+        stream.arm(self.st)
+        self.set_primary.assert_called_once_with("HDMI-A-1")
+        self.set_primary.reset_mock()
+        stream.arm(self.st)
+        self.set_primary.assert_not_called()  # already right: no xrandr call
+
+    def test_attach_makes_the_stream_primary_and_detach_hands_it_back(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        stream.attach(self.st, {})
+        self.assertEqual(self.xprimary, "BS-STREAM")
+        self.monitors = [dict(TV, focused=True), dict(HEADLESS, x=20000)]  # the TV is back on
+        stream.detach()
+        self.assertEqual(self.xprimary, "HDMI-A-1")
+
+    def test_settle_follows_a_reconnected_display(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        self.xprimary = "BS-STREAM"  # XWayland moved it over while the TV was gone
+        with mock.patch("battlestation.hypr.cursor_pos", return_value=(900, 1800)):
+            self.assertEqual(stream.settle()["primary"], "HDMI-A-1")
+        self.assertEqual(self.xprimary, "HDMI-A-1")
+
+    def test_settle_never_makes_the_placeholder_primary(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        self.set_primary.reset_mock()
+        self.monitors = [dict(mon("FALLBACK", "", 1920, 1080, 60.0, []), focused=True), dict(HEADLESS, x=20000)]
+        with mock.patch("battlestation.hypr.cursor_pos", return_value=(900, 1800)):
+            self.assertIsNone(stream.settle()["primary"])
+        self.set_primary.assert_not_called()
+
     def test_settle_leaves_a_live_stream_alone(self):
         stream.set_enabled(True)
         stream.arm(self.st)
@@ -741,7 +783,7 @@ class StreamTests(unittest.TestCase):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), mock.patch("battlestation.hypr.cursor_pos", return_value=(0, 0)):
             self.assertEqual(cli.main(["stream", "settle"]), 0)
-        self.assertEqual(json.loads(buf.getvalue()), {"ok": True, "settled": True, "moved": True})
+        self.assertEqual(json.loads(buf.getvalue()), {"ok": True, "settled": True, "moved": True, "primary": "HDMI-A-1"})
 
     def test_window_addresses_are_validated(self):
         mock.patch.stopall()
@@ -772,7 +814,6 @@ class StreamTests(unittest.TestCase):
         stream.arm(self.st)
         stream.attach(self.st, {})
         stream.set_enabled(False)
-        self.remove.side_effect = lambda name: self.assertIsNone(self.overlay())  # never while its rule still switches it off
         stream.disarm(self.st)
         self.assertIsNone(self.overlay())
         self.systemctl.assert_called_with("stop", self.st.unit)
@@ -801,46 +842,6 @@ class StreamTests(unittest.TestCase):
         self.assertEqual(stream.watchdog(self.st)["action"], "none")  # some other NVENC user, e.g. a recording
         self.assertIn("parked", self.overlay())
 
-    def test_arm_gives_focus_back_after_creating_the_output(self):
-        stream.set_enabled(True)
-        self.monitors = [dict(TV, focused=True, activeWorkspace={"id": 2})]
-        self.create.side_effect = lambda name: setattr(self, "monitors", [
-            dict(TV, focused=False, activeWorkspace={"id": 1}), dict(HEADLESS, disabled=True, focused=True)])
-        stream.arm(self.st)
-        self.dispatch.assert_called_once_with('hl.dsp.focus({ workspace = "2" })')
-
-    def test_parked_output_is_off_while_a_real_display_is_on(self):
-        stream.set_enabled(True)
-        stream.arm(self.st)
-        self.assertIn('hl.monitor({ output = "BS-STREAM", disabled = true })', self.overlay())
-        self.dispatch.assert_not_called()  # no hop to the parking workspace of an output that is off
-
-    def test_standby_follows_the_real_displays(self):
-        stream.set_enabled(True)
-        self.monitors = [dict(TV, disabled=True), dict(HEADLESS, disabled=True)]  # TV switched off
-        stream.arm(self.st)
-        self.assertIn("parked, standby", self.overlay())  # Sunshine's encoder probe needs an output
-        self.monitors = [TV, HEADLESS]  # TV back
-        self.assertEqual(stream.watchdog(self.st)["action"], "none")
-        self.assertIn("disabled = true", self.overlay())
-        self.monitors = [dict(HEADLESS, disabled=True)]  # TV unplugged
-        stream.watchdog(self.st)
-        self.assertIn("parked, standby", self.overlay())
-
-    def test_detach_parks_off_only_if_a_real_display_comes_back(self):
-        stream.set_enabled(True)
-        stream.arm(self.st)
-        stream.attach(self.st, {})
-        self.monitors = [dict(TV, disabled=True), HEADLESS]  # what attach did
-        stream.attach(self.st, {})  # a repeated `do` must not forget the TV was on
-        stream.detach()
-        self.assertIn("disabled = true", self.overlay())
-        self.assertNotIn("standby", self.overlay())
-        self.monitors = [HEADLESS]  # TV unplugged: nothing else for Sunshine to probe
-        stream.attach(self.st, {})
-        stream.detach()
-        self.assertIn("parked, standby", self.overlay())
-
     def test_watchdog_detaches_when_sunshine_dies(self):
         stream.set_enabled(True)
         stream.arm(self.st)
@@ -855,6 +856,44 @@ class StreamTests(unittest.TestCase):
         self.assertNotIn("BS-STREAM", text)
         self.assertEqual([r.match for r in scenes.capture_rules(scenes.real_monitors(self.cfg), caps_for)],
                          [f"desc:{TV_DESC}"])
+
+
+class XWaylandTests(unittest.TestCase):
+    QUERY = ("Screen 0: minimum 16 x 16, current 23840 x 2160, maximum 32767 x 32767\n"
+             "HDMI-A-1 connected 3840x2160+0+0 (normal left inverted right x axis y axis) 0mm x 0mm\n"
+             "   3840x2160     59.98*+\n"
+             "BS-STREAM connected primary 1280x800+20000+0 (normal left inverted right x axis y axis) 0mm x 0mm\n")
+
+    def test_parse_primary(self):
+        self.assertEqual(xwayland.parse_primary(self.QUERY), "BS-STREAM")
+        self.assertIsNone(xwayland.parse_primary(self.QUERY.replace(" primary", "")))
+        self.assertIsNone(xwayland.parse_primary(""))
+
+    def test_display_falls_back_to_the_lowest_socket(self):
+        # Sunshine's prep-cmd may run without $DISPLAY.
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("X2", "X0_", "X1", "junk"):
+                Path(tmp, name).touch()
+            self.assertEqual(xwayland.display({"DISPLAY": ":5"}, Path(tmp)), ":5")
+            self.assertEqual(xwayland.display({}, Path(tmp)), ":1")
+            self.assertEqual(xwayland.display({}, Path(tmp) / "missing"), "")
+
+    def test_set_primary_reads_back_because_xrandr_exits_zero_regardless(self):
+        answers = iter([None, None, "HDMI-A-1"])  # XWayland learns about a new output a moment late
+        with mock.patch.object(xwayland, "_xrandr", return_value=""), \
+                mock.patch.object(xwayland, "primary", side_effect=lambda: next(answers)), \
+                mock.patch("time.sleep"):
+            self.assertTrue(xwayland.set_primary("HDMI-A-1"))
+
+    def test_set_primary_gives_up(self):
+        clock = iter([0.0, 0.5, 1.5])
+        with mock.patch.object(xwayland, "_xrandr", return_value=""), \
+                mock.patch.object(xwayland, "primary", return_value=None), \
+                mock.patch("time.monotonic", side_effect=lambda: next(clock)), mock.patch("time.sleep"):
+            self.assertFalse(xwayland.set_primary("NOPE-1"))
+        with mock.patch.object(xwayland, "_xrandr", return_value=None) as run:
+            self.assertFalse(xwayland.set_primary("HDMI-A-1"))  # no xrandr, or no X: no retrying
+            run.assert_called_once()
 
 
 class SunshineConfTests(unittest.TestCase):

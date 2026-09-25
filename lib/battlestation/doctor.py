@@ -228,6 +228,8 @@ def _stream_checks(st, monitors: list[dict], add) -> None:
         pass
     if not shutil.which("nvidia-smi"):
         add("stream", "warn", "nvidia-smi not found: the watchdog cannot tell when a client vanished, only when Sunshine stops")
+    if not shutil.which("xrandr"):
+        add("stream", "warn", "xrandr not found: Wine games may open on the parked stream output: sudo pacman -S xorg-xrandr")
 
 
 def _tailscale_checks(ts: dict, add) -> None:

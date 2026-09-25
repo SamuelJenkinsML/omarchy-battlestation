@@ -12,7 +12,6 @@ Item {
   property var monitors: []
   property var caps: ({})
   property var layout: ({})   // connector -> {hdr, vrr, bpc, mode} from the active scene
-  property string ignoreOutput: ""   // the stream output: parking it is not a hotplug
 
   // While true (the in-game overlay is up), follow the kernel's live signal
   // state and poll Hyprland every second instead of every three.
@@ -97,13 +96,9 @@ Item {
       onStreamFinished: {
         try {
           var parsed = JSON.parse(text)
-          var topology = function(list) {
-            return list.filter(function(m) { return m.name !== root.ignoreOutput })
-                       .map(function(m) { return m.name + ":" + m.disabled }).join(",")
-          }
-          var before = topology(root.monitors)
+          var before = root.monitors.map(function(m) { return m.name + ":" + m.disabled }).join(",")
           root.monitors = parsed
-          var after = topology(parsed)
+          var after = parsed.map(function(m) { return m.name + ":" + m.disabled }).join(",")
           if (before !== after) {
             root.refreshCaps()
             root.topologyChanged()
