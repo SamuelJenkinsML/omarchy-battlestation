@@ -16,7 +16,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import fsutil, paths
+from . import fsutil, paths, tailscale
 from .config import StreamConfig
 
 # First release with the multi-plane DMA-BUF fix for wlroots capture (Sunshine
@@ -25,7 +25,8 @@ MIN_VERSION = (2026, 914, 233613)
 PREP_KEY = "global_prep_cmd"
 _LINE_RE = re.compile(r"^\s*([A-Za-z0-9_]+)\s*=\s*(.*?)\s*$")
 
-TCP_PORTS = "47984,47989,47990,48010"
+# 47990, the admin page, is deliberately not here: it answers on this machine only.
+TCP_PORTS = "47984,47989,48010"
 UDP_PORTS = "47998:48000,48010"
 
 
@@ -35,7 +36,9 @@ def cli_path() -> str:
 
 
 def wanted_keys(st: StreamConfig) -> dict[str, str]:
-    return {"capture": "wlr", "encoder": "nvenc", "output_name": st.output}
+    # Sunshine counts Tailscale's 100.64.0.0/10 as LAN, so its default would
+    # show the admin page to every device on the tailnet.
+    return {"capture": "wlr", "encoder": "nvenc", "output_name": st.output, "origin_web_ui_allowed": "pc"}
 
 
 def prep_entry(cli: str | None = None) -> dict:
@@ -164,17 +167,27 @@ def privileged_steps(st: StreamConfig, uinput_ok: bool = True) -> list[dict]:
         })
     steps.append({
         "title": "Open the streaming ports to your home network only",
-        "why": "47990 is Sunshine's admin page; never open it to the internet.",
+        "why": "Sunshine's admin page (47990) stays closed: it is only needed on this machine.",
         "commands": [f"sudo ufw allow from {cidr} to any port {TCP_PORTS} proto tcp",
                      f"sudo ufw allow from {cidr} to any port {UDP_PORTS} proto udp"],
     })
+    remote = tailscale.summary()
+    if not remote["available"]:
+        steps.append({
+            "title": "Streaming away from home: Tailscale",
+            "why": "Nothing is exposed publicly and no ports are forwarded. --operator lets the panel switch turn "
+                   "it on and off without a password. Then, at login.tailscale.com, disable key expiry for this "
+                   "machine so it does not drop off the tailnet while you are away.",
+            "commands": ["sudo pacman -S tailscale && sudo systemctl enable --now tailscaled",
+                         'sudo tailscale up --ssh=false --operator="$USER"'],
+        })
     steps.append({
-        "title": "Remote access over Tailscale",
-        "why": "Nothing is exposed publicly. UDP 41641 lets Tailscale connect directly; relayed links are too slow to stream.",
-        "commands": ["sudo pacman -S tailscale && sudo systemctl enable --now tailscaled && sudo tailscale up",
-                     f"sudo ufw allow in on tailscale0 to any port {TCP_PORTS} proto tcp",
-                     f"sudo ufw allow in on tailscale0 to any port {UDP_PORTS} proto udp",
-                     "sudo ufw allow 41641/udp"],
+        "title": "Optional: let the tailnet reach only the streaming ports",
+        "why": "tailscaled accepts tailnet traffic ahead of ufw, so ufw rules do not scope it; the tailnet policy "
+               "does. Worth it when other people or devices share your tailnet. Replacing the default allow-all "
+               "policy with this grant closes everything else between your devices, so add grants for those too.",
+        "commands": ["# login.tailscale.com > Access controls, inside \"grants\":"],
+        "grant": tailscale.grant(TCP_PORTS, UDP_PORTS, remote["ip"]),
     })
     if not uinput_ok:
         steps.append({

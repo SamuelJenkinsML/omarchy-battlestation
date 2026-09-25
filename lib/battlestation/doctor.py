@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import config as config_mod
-from . import controller, drmprops, edid, fsutil, hypr, mangohud, paths, pad, scenes, stream, sunshine, tv
+from . import controller, drmprops, edid, fsutil, hypr, mangohud, paths, pad, scenes, stream, sunshine, tailscale, tv
 
 
 @dataclass
@@ -185,7 +185,9 @@ def _stream_checks(st, monitors: list[dict], add) -> None:
 
     missing = sunshine.missing_keys(st, fsutil.read_text(paths.sunshine_conf()))
     add("stream", "warn" if missing else "ok",
-        (f"sunshine.conf is missing {', '.join(missing)}: battlestation setup stream --write-config") if missing
+        (f"sunshine.conf is missing {', '.join(missing)}" +
+         (" (its admin page is open to the network)" if "origin_web_ui_allowed" in missing else "") +
+         ": battlestation setup stream --write-config") if missing
         else "sunshine.conf captures the virtual output and calls attach/detach")
 
     present = any(m.get("name") == st.output for m in monitors)
@@ -206,11 +208,7 @@ def _stream_checks(st, monitors: list[dict], add) -> None:
         add("stream", "ok" if allowed else "warn", "firewall allows the streaming ports" if allowed
             else "ufw has no rule for the streaming ports; see `battlestation setup stream`")
 
-    ip = stream.tailscale_ip()
-    if ip:
-        add("stream", "ok", f"Tailscale up at {ip}; check `tailscale ping <deck>` says 'direct', a relayed link is too slow")
-    else:
-        add("stream", "info", "Tailscale not running: streaming works on the home network only")
+    _tailscale_checks(tailscale.status(), add)
 
     # Things that stop a headless host from being reachable at all.
     try:
@@ -230,6 +228,28 @@ def _stream_checks(st, monitors: list[dict], add) -> None:
         pass
     if not shutil.which("nvidia-smi"):
         add("stream", "warn", "nvidia-smi not found: the watchdog cannot tell when a client vanished, only when Sunshine stops")
+
+
+def _tailscale_checks(ts: dict, add) -> None:
+    info = tailscale.summary(ts)
+    if not ts["installed"]:
+        add("stream", "info", "Tailscale not installed: streaming works on the home network only")
+        return
+    if not info["on"]:
+        add("stream", "info", "Tailscale is off: streaming works on the home network only. " +
+            (info["hint"] or "Switch on \"Stream away from home\" in the panel"))
+        return
+    add("stream", "ok", f"Tailscale up as {ts['name'] or ts['ip']} ({ts['ip']}); add that name in Moonlight")
+    if not ts["operator"]:
+        add("stream", "warn", f"the panel cannot switch Tailscale: {tailscale.OPERATOR_FIX}")
+    days = tailscale.key_days_left(ts)
+    if days is not None and days < 30:
+        add("stream", "warn", f"this machine's Tailscale key expires in {max(days, 0)} days and remote streaming stops "
+            "with it: disable key expiry for it at login.tailscale.com")
+    for peer in ts["peers"]:
+        if peer["online"] and peer["active"] and peer["relay"] and not peer["direct"]:
+            add("stream", "warn", f"{peer['host']} is connected through a relay ({peer['relay']}), too slow to stream "
+                f"over: battlestation stream remote-check {peer['host']}")
 
 
 def format_text(checks: list[Check]) -> str:

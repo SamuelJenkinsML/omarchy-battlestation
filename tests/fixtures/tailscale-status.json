@@ -1,0 +1,19 @@
+{
+  "BackendState": "Running",
+  "Self": {
+    "HostName": "battlestation",
+    "DNSName": "battlestation.tail1234.ts.net.",
+    "OS": "linux",
+    "TailscaleIPs": ["100.101.102.103", "fd7a:115c:a1e0::1"],
+    "KeyExpiry": "2026-10-05T09:30:00.123456789Z",
+    "Online": true
+  },
+  "Peer": {
+    "nodekey:aaa": {"HostName": "steamdeck", "DNSName": "steamdeck.tail1234.ts.net.", "OS": "linux",
+                    "Online": true, "Active": true, "CurAddr": "203.0.113.7:41641", "Relay": "lhr"},
+    "nodekey:bbb": {"HostName": "phone", "DNSName": "phone.tail1234.ts.net.", "OS": "android",
+                    "Online": true, "Active": true, "CurAddr": "", "Relay": "fra"},
+    "nodekey:ccc": {"HostName": "laptop", "DNSName": "laptop.tail1234.ts.net.", "OS": "macOS",
+                    "Online": false, "Active": false, "CurAddr": "", "Relay": "lhr"}
+  }
+}

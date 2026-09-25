@@ -43,6 +43,10 @@ Item {
   readonly property bool streamAvailable: stream.available === true
   readonly property bool streamEnabled: stream.enabled === true
   readonly property bool streamAttached: stream.attached === true
+  // Tailscale: whether it is on is tailscaled's state, so this follows `tailscale up|down` too.
+  readonly property var remote: stream.remote || ({})
+  readonly property bool remoteAvailable: remote.available === true
+  readonly property bool remoteOn: remote.on === true
   readonly property string streamPhase: streamProc.running && streamProc.label !== "" ? "working" : (stream.phase || "off")
 
   // ---- live hardware state ----
@@ -150,6 +154,15 @@ Item {
     else runStream("switching on", ["on"])
   }
 
+  function remoteToggle() {
+    if (!remoteAvailable) {
+      notify("Tailscale is not set up", remote.hint || "Run `battlestation setup stream`.", "normal", "󰖂")
+      return
+    }
+    if (remoteOn) runStream("leaving the tailnet", ["remote-off"])
+    else runStream("joining the tailnet", ["remote-on"])
+  }
+
   // The panic button: gives the desktop back to the real displays.
   function streamDetach() {
     Util.execArgv([cli, "stream", "detach", "--reason", "asked to"])
@@ -177,6 +190,24 @@ Item {
     repeat: true
     running: root.streamEnabled
     onTriggered: if (!watchdogProc.running && !streamProc.running) watchdogProc.running = true
+  }
+
+  // A display that goes away hands its workspaces and focus to whatever is
+  // left, the parked virtual output included, and a TV back from standby does
+  // not get them all back.
+  Process {
+    id: settleProc
+    command: [root.cli, "stream", "settle"]
+  }
+
+  Timer {
+    id: settleDebounce
+    interval: 1000
+    // A scene switch settles by itself, and arm is the one creating the output.
+    onTriggered: {
+      if (actionProc.running || streamProc.running) restart()
+      else if (!settleProc.running) settleProc.running = true
+    }
   }
 
   // ---- scene actions ----
@@ -318,6 +349,7 @@ Item {
   DisplayState {
     id: displayState
     cli: root.cli
+    onOutputsChanged: if (root.streamEnabled && !root.streamAttached) settleDebounce.restart()
     onTopologyChanged: {
       // Attaching a stream switches the displays off, which is not a hotplug.
       if (root.sceneState.autoSceneOnHotplug && !root.pendingRevert && !root.busy && !root.streamAttached)
@@ -435,6 +467,9 @@ Item {
     function streamOn(): void { if (!root.streamEnabled) root.streamToggle() }
     function streamOff(): void { if (root.streamEnabled) root.streamToggle() }
     function streamDetach(): void { root.streamDetach() }
+    function remoteToggle(): void { root.remoteToggle() }
+    function remoteOn(): void { if (!root.remoteOn) root.remoteToggle() }
+    function remoteOff(): void { if (root.remoteOn) root.remoteToggle() }
     function streamState(): string { return JSON.stringify(root.stream) }
     function osdToggle(): void { root.setOsd(!root.osdVisible) }
     function osdShow(): void { root.setOsd(true) }

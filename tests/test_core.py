@@ -10,7 +10,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
-from battlestation import config, drmprops, edid, hypr, live, luagen, mangohud, pad, scenes, stream, sunshine, tv, ws  # noqa: E402
+from battlestation import config, drmprops, edid, hypr, live, luagen, mangohud, pad, scenes, stream, sunshine, tailscale, tv, ws  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures"
 TV_DESC = "Samsung Electric Company SAMSUNG 0x01000E00"
@@ -415,6 +415,29 @@ class ReclaimTests(unittest.TestCase):
         scenes.reclaim_from_virtual("BS-STREAM")
         self.assertEqual(self.calls, [])
 
+    def test_a_settled_desktop_dispatches_nothing(self):
+        # Runs on every display hotplug: a redundant focus would flip back and
+        # forth under workspace_back_and_forth, and each dispatch is a hyprctl.
+        self.monitors = [dict(UW, focused=True, activeWorkspace={"id": 1}),
+                         dict(HEADLESS, focused=False, activeWorkspace={"id": 99})]
+        with mock.patch("battlestation.hypr.workspaces", return_value=[
+                {"id": 1, "monitor": "DP-1", "windows": 1}, {"id": 99, "monitor": "BS-STREAM", "windows": 0}]), \
+                mock.patch("battlestation.hypr.clients") as clients:
+            self.assertFalse(scenes.reclaim_from_virtual("BS-STREAM"))
+            clients.assert_not_called()
+        self.assertEqual(self.calls, [])
+
+    def test_focus_left_on_the_parked_output_comes_back(self):
+        self.monitors = [dict(UW, focused=False, activeWorkspace={"id": 1}),
+                         dict(HEADLESS, focused=True, activeWorkspace={"id": 99})]
+        with mock.patch("battlestation.hypr.workspaces", return_value=[
+                {"id": 1, "monitor": "DP-1", "windows": 1}, {"id": 99, "monitor": "BS-STREAM", "windows": 0}]):
+            self.assertTrue(scenes.reclaim_from_virtual("BS-STREAM"))
+        self.assertEqual(self.calls, [("focus_workspace", 1)])
+
+    def test_reports_that_it_moved_something(self):
+        self.assertTrue(scenes.reclaim_from_virtual("BS-STREAM"))
+
 
 class InstanceTests(unittest.TestCase):
     def setUp(self):
@@ -648,6 +671,70 @@ class StreamTests(unittest.TestCase):
         stream.detach()
         self.dispatch.assert_not_called()
 
+    def _stranded_after_tv_reconnect(self):
+        # The TV dropped out, Hyprland handed workspace 3 to the parked output,
+        # and the TV came back without it.
+        self.monitors = [dict(TV, focused=True, activeWorkspace={"id": 2}),
+                         dict(HEADLESS, x=20000, focused=False, activeWorkspace={"id": 3})]
+        self.workspaces = [{"id": 2, "monitor": "HDMI-A-1", "windows": 2},
+                           {"id": 3, "monitor": "BS-STREAM", "windows": 1},
+                           {"id": 99, "monitor": "BS-STREAM", "windows": 0}]
+
+    def test_settle_brings_stranded_workspaces_home_and_finds_the_pointer(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        self._stranded_after_tv_reconnect()
+        self.dispatch.reset_mock()
+        with mock.patch("battlestation.hypr.cursor_pos", return_value=(20100, 50)):
+            result = stream.settle()
+        self.assertTrue(result["moved"])
+        self.assertEqual([c.args[0] for c in self.dispatch.call_args_list], [
+            'hl.dsp.focus({ workspace = "99" })',
+            'hl.dsp.workspace.move({ workspace = "3", monitor = "HDMI-A-1" })',
+            'hl.dsp.focus({ workspace = "2" })',
+            'hl.dsp.cursor.move({ x = 1920, y = 1080 })'])
+
+    def test_settle_on_a_settled_desktop_touches_nothing(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        self.monitors = [dict(TV, focused=True, activeWorkspace={"id": 2}),
+                         dict(HEADLESS, x=20000, focused=False, activeWorkspace={"id": 99})]
+        self.workspaces = [{"id": 2, "monitor": "HDMI-A-1", "windows": 2},
+                           {"id": 99, "monitor": "BS-STREAM", "windows": 0}]
+        self.dispatch.reset_mock()
+        with mock.patch("battlestation.hypr.cursor_pos", return_value=(900, 1800)):
+            self.assertFalse(stream.settle()["moved"])
+        self.dispatch.assert_not_called()
+
+    def test_settle_leaves_a_live_stream_alone(self):
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        stream.attach(self.st, {})
+        self.monitors = [dict(HEADLESS, focused=True, activeWorkspace={"id": 2})]
+        self.dispatch.reset_mock()
+        self.assertEqual(stream.settle()["skipped"], "attached")
+        self.dispatch.assert_not_called()
+
+    def test_settle_without_a_virtual_output_does_nothing(self):
+        self._stranded_after_tv_reconnect()
+        self.assertEqual(stream.settle()["skipped"], "not armed")
+        self.dispatch.assert_not_called()
+
+    def test_settle_needs_no_config(self):
+        # The shell runs it on every hotplug; a broken config must not stop it.
+        import contextlib
+        import io
+        from battlestation import cli, paths
+        stream.set_enabled(True)
+        stream.arm(self.st)
+        paths.config_file().parent.mkdir(parents=True, exist_ok=True)
+        paths.config_file().write_text("not [valid toml")
+        self._stranded_after_tv_reconnect()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), mock.patch("battlestation.hypr.cursor_pos", return_value=(0, 0)):
+            self.assertEqual(cli.main(["stream", "settle"]), 0)
+        self.assertEqual(json.loads(buf.getvalue()), {"ok": True, "settled": True, "moved": True})
+
     def test_window_addresses_are_validated(self):
         mock.patch.stopall()
         with self.assertRaises(hypr.HyprError):
@@ -725,6 +812,29 @@ class SunshineConfTests(unittest.TestCase):
     PREP = {"do": "/x/battlestation stream attach", "undo": "/x/battlestation stream detach", "elevated": "false"}
     WANT = {"capture": "wlr", "encoder": "nvenc", "output_name": "BS-STREAM"}
 
+    def test_admin_page_is_kept_to_this_machine(self):
+        st = cfg_from(STREAM_CFG).stream
+        self.assertEqual(sunshine.wanted_keys(st)["origin_web_ui_allowed"], "pc")
+        self.assertIn("origin_web_ui_allowed", sunshine.missing_keys(st, "origin_web_ui_allowed = lan\n"))
+        with mock.patch.object(sunshine.tailscale, "summary", return_value=tailscale.summary(TS_ABSENT)), \
+                mock.patch.object(sunshine, "lan_cidr", return_value="10.0.0.0/24"), \
+                mock.patch.object(sunshine, "installed_version", return_value="2026.914.233613-1"):
+            steps = sunshine.privileged_steps(st)
+        printed = "\n".join(c for step in steps for c in step["commands"]) + "".join(s.get("grant", "") for s in steps)
+        self.assertNotIn("47990", printed)
+        self.assertNotIn("tailscale0", printed)  # tailscaled accepts ahead of ufw; such rules scope nothing
+        self.assertIn("--operator", printed)
+        grant = json.loads(next(s["grant"] for s in steps if s.get("grant")))
+        self.assertEqual(grant["ip"], ["tcp:47984", "tcp:47989", "tcp:48010", "udp:47998-48000", "udp:48010"])
+
+    def test_tailscale_install_step_goes_away_once_usable(self):
+        with mock.patch.object(sunshine.tailscale, "summary", return_value=tailscale.summary(ts_fixture())), \
+                mock.patch.object(sunshine, "lan_cidr", return_value=""), \
+                mock.patch.object(sunshine, "installed_version", return_value="2026.914.233613-1"):
+            steps = sunshine.privileged_steps(cfg_from(STREAM_CFG).stream)
+        self.assertFalse([s for s in steps if "pacman -S tailscale" in " ".join(s["commands"])])
+        self.assertIn("100.101.102.103", next(s["grant"] for s in steps if s.get("grant")))
+
     def test_merge_keeps_foreign_settings_and_prep_commands(self):
         text = ('# mine\nsunshine_name = den\ncapture = kms\n'
                 'global_prep_cmd = [{"do":"lights off","undo":"lights on"}]\n')
@@ -748,7 +858,8 @@ class SunshineConfTests(unittest.TestCase):
 
     def test_missing_keys(self):
         st = cfg_from(STREAM_CFG).stream
-        self.assertEqual(sunshine.missing_keys(st, None), ["capture", "encoder", "output_name", "global_prep_cmd"])
+        self.assertEqual(sunshine.missing_keys(st, None),
+                         ["capture", "encoder", "output_name", "origin_web_ui_allowed", "global_prep_cmd"])
         self.assertEqual(sunshine.missing_keys(st, sunshine.merge_conf("", sunshine.wanted_keys(st), self.PREP)), [])
 
     def test_write_conf_preserves_mode(self):
@@ -767,6 +878,160 @@ class SunshineConfTests(unittest.TestCase):
         self.assertTrue(sunshine.version_ok("2027.101.1-1"))
         self.assertFalse(sunshine.version_ok("2026.516.143833-4.1"))
         self.assertFalse(sunshine.version_ok(""))
+
+
+TS_ABSENT = {"installed": False, "state": "", "operator": False, "ip": "", "name": "", "keyExpiry": "", "peers": []}
+
+
+def _proc(stdout="", returncode=0, stderr=""):
+    return mock.Mock(stdout=stdout, stderr=stderr, returncode=returncode)
+
+
+def ts_fixture(**over):
+    """tailscale.status() as it parses the fixture, with us as the operator."""
+    raw = (FIXTURES / "tailscale-status.json").read_text()
+
+    def run(args, timeout):
+        return _proc(raw) if args[0] == "status" else _proc(json.dumps({"OperatorUser": tailscale._user()}))
+
+    with mock.patch.object(tailscale.shutil, "which", return_value="/usr/bin/tailscale"), \
+            mock.patch.object(tailscale, "_run", side_effect=run):
+        return {**tailscale.status(), **over}
+
+
+class TailscaleTests(unittest.TestCase):
+    def test_status_reads_self_and_peers(self):
+        ts = ts_fixture()
+        self.assertEqual((ts["state"], ts["ip"], ts["name"], ts["operator"]),
+                         ("Running", "100.101.102.103", "battlestation.tail1234.ts.net", True))
+        links = {p["host"]: (p["online"], p["direct"]) for p in ts["peers"]}
+        self.assertEqual(links, {"steamdeck": (True, True), "phone": (True, False), "laptop": (False, False)})
+
+    def test_status_survives_no_binary_no_daemon_and_garbage(self):
+        with mock.patch.object(tailscale.shutil, "which", return_value=None):
+            self.assertEqual(tailscale.status(), TS_ABSENT)
+        for answer in (None, _proc("failed to connect", 1), _proc("not json"), _proc("[]")):
+            with mock.patch.object(tailscale.shutil, "which", return_value="/usr/bin/tailscale"), \
+                    mock.patch.object(tailscale, "_run", return_value=answer):
+                ts = tailscale.status()
+            self.assertEqual((ts["installed"], ts["state"], ts["peers"]), (True, "", []))
+            self.assertIn("systemctl enable --now tailscaled", tailscale.summary(ts)["hint"])
+
+    def test_summary_gates_the_switch(self):
+        self.assertEqual(tailscale.summary(TS_ABSENT)["available"], False)
+        self.assertEqual(tailscale.summary(TS_ABSENT)["hint"], "")  # the row is hidden, nothing to explain
+        on = tailscale.summary(ts_fixture())
+        self.assertEqual((on["available"], on["on"], on["name"]), (True, True, "battlestation.tail1234.ts.net"))
+        self.assertEqual((on["link"], on["linkPeer"]), ("relayed", "phone"))  # the bad link is the one to surface
+        off = tailscale.summary(ts_fixture(state="Stopped"))
+        self.assertEqual((off["available"], off["on"], off["name"], off["link"]), (True, False, "", ""))
+        self.assertIn("--operator", tailscale.summary(ts_fixture(operator=False))["hint"])
+        login = tailscale.summary(ts_fixture(state="NeedsLogin"))
+        self.assertEqual(login["available"], False)
+        self.assertIn("tailscale up", login["hint"])
+
+    def test_direct_only_when_every_active_peer_is(self):
+        ts = ts_fixture()
+        ts["peers"] = [p for p in ts["peers"] if p["host"] != "phone"]
+        self.assertEqual(tailscale.summary(ts)["link"], "direct")
+
+    def test_set_running_is_bare_up_and_down(self):
+        calls = []
+
+        def run(args, timeout):
+            calls.append(args)
+            return _proc()
+
+        with mock.patch.object(tailscale, "status", return_value=ts_fixture(state="Stopped")), \
+                mock.patch.object(tailscale, "_run", side_effect=run):
+            tailscale.set_running(True)
+            tailscale.set_running(False)
+        self.assertEqual(calls, [["up"], ["down"]])  # a flag on `up` makes it demand every non-default setting
+
+    def test_set_running_explains_what_is_missing(self):
+        for ts, expect in ((TS_ABSENT, "not installed"), (ts_fixture(operator=False), "--operator"),
+                           (ts_fixture(state="NeedsLogin"), "tailscale up")):
+            with mock.patch.object(tailscale, "status", return_value=ts), \
+                    mock.patch.object(tailscale, "_run") as run, self.assertRaises(tailscale.TailscaleError) as ctx:
+                tailscale.set_running(True)
+            self.assertIn(expect, str(ctx.exception))
+            run.assert_not_called()
+        with mock.patch.object(tailscale, "status", return_value=ts_fixture()), \
+                mock.patch.object(tailscale, "_run", return_value=_proc("", 1, "Access denied: prefs write")), \
+                self.assertRaises(tailscale.TailscaleError) as ctx:
+            tailscale.set_running(False)
+        self.assertIn("--operator", str(ctx.exception))
+
+    def test_parse_ping(self):
+        relayed = "pong from steamdeck (100.64.0.9) via DERP(lhr) in 48ms\n" * 5 + "direct connection not established\n"
+        self.assertEqual(tailscale.parse_ping(relayed),
+                         {"ip": "100.64.0.9", "direct": False, "via": "DERP(lhr)", "latencyMs": 48.0})
+        direct = ("pong from steamdeck (100.64.0.9) via DERP(lhr) in 48ms\n"
+                  "pong from steamdeck (100.64.0.9) via 203.0.113.7:41641 in 11.5ms\n")
+        self.assertEqual(tailscale.parse_ping(direct),
+                         {"ip": "100.64.0.9", "direct": True, "via": "203.0.113.7:41641", "latencyMs": 11.5})
+        self.assertIsNone(tailscale.parse_ping("timed out\n"))
+
+    def test_check_hints_at_the_router_when_relayed(self):
+        def run(args, timeout):
+            if args[0] == "ping":
+                return _proc("pong from steamdeck (100.64.0.9) via DERP(lhr) in 48ms\n", 1)
+            return _proc(json.dumps({"UDP": True, "IPv6": False, "MappingVariesByDestIP": True, "UPnP": False}))
+
+        with mock.patch.object(tailscale, "status", return_value=ts_fixture()), \
+                mock.patch.object(tailscale, "_run", side_effect=run):
+            result = tailscale.check("steamdeck")
+            listing = tailscale.check("")
+        self.assertEqual((result["direct"], result["network"]["hardNat"]), (False, True))
+        self.assertIn("UDP 41641", result["hint"])
+        self.assertEqual([p["host"] for p in listing["peers"]], ["steamdeck", "phone"])
+
+    def test_key_days_left(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 9, 21, tzinfo=timezone.utc)
+        self.assertEqual(tailscale.key_days_left(ts_fixture(), now), 14)
+        self.assertIsNone(tailscale.key_days_left(ts_fixture(keyExpiry=""), now))
+
+    def test_doctor_warns_about_relays_and_expiry(self):
+        from battlestation import doctor
+        found = []
+        with mock.patch.object(tailscale, "key_days_left", return_value=14):
+            doctor._tailscale_checks(ts_fixture(), lambda area, status, msg: found.append((status, msg)))
+        warns = [msg for status, msg in found if status == "warn"]
+        self.assertEqual(found[0][0], "ok")
+        self.assertTrue(any("phone" in w and "relay" in w for w in warns))
+        self.assertTrue(any("expires in 14 days" in w for w in warns))
+        self.assertFalse(any("steamdeck" in w for w in warns))
+
+
+class RemoteSwitchTests(unittest.TestCase):
+    def run_cli(self, action, enabled):
+        from battlestation import cli
+        with mock.patch.object(cli.tailscale, "set_running", return_value=tailscale.summary(ts_fixture())) as running, \
+                mock.patch.object(cli, "_load_cfg", return_value=cfg_from(STREAM_CFG)), \
+                mock.patch.object(cli.stream, "is_enabled", return_value=enabled), \
+                mock.patch.object(cli.stream, "set_enabled") as set_enabled, \
+                mock.patch.object(cli.stream, "arm", return_value={"armed": True}) as arm, \
+                mock.patch.object(cli, "notify"), mock.patch.object(cli, "out"):
+            self.assertEqual(cli.main(["stream", action]), 0)
+        return running, set_enabled, arm
+
+    def test_remote_on_also_switches_streaming_on(self):
+        running, set_enabled, arm = self.run_cli("remote-on", enabled=False)
+        running.assert_called_once_with(True)
+        set_enabled.assert_called_once_with(True)
+        arm.assert_called_once()
+
+    def test_remote_on_leaves_a_running_stream_alone(self):
+        _, set_enabled, arm = self.run_cli("remote-on", enabled=True)
+        set_enabled.assert_not_called()
+        arm.assert_not_called()
+
+    def test_remote_off_leaves_streaming_alone(self):
+        running, set_enabled, arm = self.run_cli("remote-off", enabled=True)
+        running.assert_called_once_with(False)
+        set_enabled.assert_not_called()
+        arm.assert_not_called()
 
 
 if __name__ == "__main__":

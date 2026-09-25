@@ -21,12 +21,11 @@ from __future__ import annotations
 
 import fcntl
 import os
-import shutil
 import subprocess
 import time
 from contextlib import contextmanager
 
-from . import fsutil, hypr, luagen, paths, scenes
+from . import fsutil, hypr, luagen, paths, scenes, tailscale
 from .config import StreamConfig
 
 STAY_AWAKE = ("omarchy-toggle-idle", "stay-awake")
@@ -394,6 +393,26 @@ def _detach_locked(state: dict, reason: str, resumable: bool = False) -> dict:
     return {"attached": False, "changed": True, "reason": reason}
 
 
+def settle() -> dict:
+    """After a display comes back: nothing left on the parked output.
+
+    A TV in standby drops off HDMI, the virtual output is then the only one
+    left, and Hyprland does not always hand every workspace back on reconnect.
+    Reads the runtime state, never the config: the shell runs it on every
+    hotplug. Under the lock so it cannot race detach bringing windows home.
+    """
+    with _locked():
+        state = load_state()
+        if state.get("attached"):
+            return {"settled": False, "skipped": "attached"}
+        if not state.get("armed"):
+            return {"settled": False, "skipped": "not armed"}
+        output = state.get("output") or "BS-STREAM"
+        moved = scenes.reclaim_from_virtual(output)
+        scenes.recover_cursor(output, only_if_lost=not moved)
+        return {"settled": True, "moved": moved}
+
+
 # -- watchdog and status -------------------------------------------------------------
 
 
@@ -422,15 +441,6 @@ def watchdog(st: StreamConfig, now: float | None = None) -> dict:
         return {"action": "none", "sessions": sessions}
 
 
-def tailscale_ip() -> str:
-    if not shutil.which("tailscale"):
-        return ""
-    try:
-        proc = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=3)
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return proc.stdout.split()[0] if proc.returncode == 0 and proc.stdout.split() else ""
-
 
 def status(st: StreamConfig) -> dict:
     state = load_state()
@@ -446,5 +456,5 @@ def status(st: StreamConfig) -> dict:
     return {
         "available": st.configured, "enabled": enabled, "phase": phase, "armed": armed, "attached": attached,
         "mode": state.get("mode") or "", "output": st.output, "outputPresent": present, "unit": unit,
-        "lastDetach": state.get("lastDetach"), "tailscaleIp": tailscale_ip(),
+        "lastDetach": state.get("lastDetach"), "remote": tailscale.summary(),
     }

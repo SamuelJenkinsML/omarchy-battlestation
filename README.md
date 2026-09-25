@@ -140,7 +140,7 @@ real screen.
 
 ```bash
 battlestation setup stream                  # prints the one-time root steps; runs none of them
-battlestation setup stream --write-config   # merges four keys into ~/.config/sunshine/sunshine.conf
+battlestation setup stream --write-config   # merges five keys into ~/.config/sunshine/sunshine.conf
 ```
 
 Add a `[stream]` section to the config (an empty one is enough), set a login
@@ -179,10 +179,47 @@ Things worth knowing:
 - SDR only. Sunshine's wlroots capture carries no HDR metadata yet.
 - The watchdog counts NVENC sessions to notice a client that vanished without
   Sunshine running its `undo`. Another NVENC user (a recording) delays that.
-- For streaming away from home, use Tailscale and check `tailscale ping` says
-  *direct*; never forward Sunshine's ports, 47990 is its admin page.
+- Sunshine's admin page (47990) answers on this machine only
+  (`origin_web_ui_allowed = pc`). Never forward Sunshine's ports.
 - An encrypted root cannot be unlocked remotely. Leave the host running, and
   take Suspend out of the menu with `omarchy-toggle-suspend`.
+
+### Streaming away from home
+
+Over [Tailscale](https://tailscale.com): the Deck reaches this machine through
+an encrypted WireGuard tunnel, nothing is exposed to the internet and no
+Sunshine port is forwarded. `battlestation setup stream` prints the one-time
+steps (install, sign in with `--operator="$USER"`); after that the panel's
+**Stream away from home** switch turns it on and off with no password.
+
+- The switch *is* `tailscale up` / `tailscale down`, so typing those in a
+  terminal moves it too. Off means this machine has left the tailnet, not just
+  that a port closed. Switching it on also switches streaming on.
+  `battlestation stream remote-on|remote-off` and the `remoteToggle`, `remoteOn`
+  and `remoteOff` IPC calls mirror it, so it can be bound like
+  `streamDetach` above.
+- **Pair at home first.** The PIN is typed into the admin page, which only
+  answers on this machine. Then in Moonlight choose *Add PC* and enter the name
+  the panel shows (`<host>.<tailnet>.ts.net`); discovery does not cross the
+  tailnet, and the pairing carries over.
+- **A relayed link is too slow.** `battlestation stream remote-check <deck>`
+  pings the Deck and says *direct* or relayed; the panel and `doctor` flag a
+  relay too. To get direct: enable UPnP or NAT-PMP on the router, or forward
+  **UDP 41641** to this machine (WireGuard ignores anything it cannot
+  authenticate, so that port gives nothing away), or allow it inbound over IPv6.
+- tailscaled accepts tailnet traffic ahead of ufw, so ufw rules do not limit
+  it. If other people or devices share your tailnet, `setup stream` prints a
+  grant that opens only the streaming ports to this machine.
+- Disable key expiry for this machine at login.tailscale.com, or it drops off
+  the tailnet after 180 days, possibly while you are away. `doctor` warns a
+  month ahead.
+- On the Deck: install with
+  [deck-tailscale](https://github.com/tailscale-dev/deck-tailscale) (survives
+  SteamOS updates), then in Moonlight set 1280×800, HEVC or AV1, and a bitrate
+  around 70% of your home **upload** speed; that, not the Deck's connection, is
+  usually the limit.
+- Switch both on before you leave. The first thing you will see is the lock
+  screen; type your password through Moonlight.
 
 ## How it works
 
@@ -248,7 +285,7 @@ make logs      # plugin lines from the shell log
 
 Still open on the feature:
 
-- Tailscale for streaming away from home.
+- Streaming over Tailscale is built but has not been tried from outside the home network yet.
 - Three untested disconnect paths: pause and resume, the Deck powering off mid-stream, and connecting while the desktop is locked.
 - Taking Suspend out of the system menu.
 - HDR, once the upstream Sunshine change lands.

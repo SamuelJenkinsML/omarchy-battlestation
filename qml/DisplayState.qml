@@ -19,6 +19,7 @@ Item {
   property var liveSignal: ({})   // connector -> {vrrEnabled, hdrMetadata, colorspace, maxBpc}
 
   signal topologyChanged()
+  signal outputsChanged()
 
   function refresh() {
     if (!monProc.running) monProc.running = true
@@ -155,6 +156,10 @@ Item {
     target: Hyprland
     function onRawEvent(event) {
       var n = String(event && event.name ? event.name : "")
+      // Not folded into topologyChanged: a TV that drops out and back within
+      // the debounce leaves the same topology, but its workspaces have moved.
+      if (n === "monitoradded" || n === "monitoraddedv2" || n === "monitorremoved" || n === "monitorremovedv2")
+        root.outputsChanged()
       if (n === "monitoradded" || n === "monitorremoved" || n === "monitoraddedv2"
           || n === "monitorremovedv2" || n === "configreloaded" || n === "fullscreen")
         debounce.restart()
