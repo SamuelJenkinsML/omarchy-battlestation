@@ -13,6 +13,11 @@ Item {
   property var caps: ({})
   property var layout: ({})   // connector -> {hdr, vrr, bpc, mode} from the active scene
 
+  // While true (the in-game overlay is up), follow the kernel's live signal
+  // state and poll Hyprland every second instead of every three.
+  property bool live: false
+  property var liveSignal: ({})   // connector -> {vrrEnabled, hdrMetadata, colorspace, maxBpc}
+
   signal topologyChanged()
   signal outputsChanged()
 
@@ -48,8 +53,11 @@ Item {
     if (!mon) return null
     var c = caps[mon.name] || {}
     var l = layout[mon.name] || {}
+    var sig = live ? liveSignal[mon.name] : undefined
     var preset = String(mon.colorManagementPreset || "")
-    var hdrLive = preset === "hdr" || preset === "hdredid"
+    // HDR metadata on the wire also catches `hdr = auto` passthrough, which the preset does not.
+    var hdrSignalled = !!(sig && sig.hdrMetadata)
+    var hdrLive = hdrSignalled || preset === "hdr" || preset === "hdredid"
     var hdrMode = l.hdr || (hdrLive ? "always" : "off")
     var vrrMode = l.vrr !== undefined ? Number(l.vrr) : (mon.vrr ? 1 : 0)
     var tenBit = String(mon.currentFormat || "").indexOf("2101010") >= 0
@@ -67,9 +75,11 @@ Item {
       tenBit: tenBit,
       hdrCapable: !!c.hdr,
       hdrLive: hdrLive,
+      hdrSignalled: hdrSignalled,
+      colorspace: sig && sig.colorspace ? String(sig.colorspace) : "",
       hdrMode: hdrMode,
       vrrCapable: !!c.vrrCapable || !!c.freesync || !!c.vrr_max,
-      vrrLive: !!mon.vrr || c.vrrEnabled === true,
+      vrrLive: sig && sig.vrrEnabled !== null && sig.vrrEnabled !== undefined ? sig.vrrEnabled === true : (!!mon.vrr || c.vrrEnabled === true),
       vrrMode: vrrMode,
       maxBpc: c.maxBpcAtMode || 8,
       link: Object.keys(c).length === 0 ? "Virtual" : c.is_hdmi ? (c.max_frl_gbps ? ("HDMI 2.1 · " + c.max_frl_gbps + " Gbps FRL") : ("HDMI · " + (c.max_tmds_mhz || 340) + " MHz TMDS")) : "DisplayPort",
@@ -118,9 +128,25 @@ Item {
     onTriggered: { root.refresh(); root.refreshCaps() }
   }
 
+  Process {
+    id: liveProc
+    command: [root.cli, "live-tail"]
+    running: root.live
+    stdout: SplitParser {
+      onRead: function(line) {
+        try {
+          var msg = JSON.parse(line)
+          if (msg.event === "live") root.liveSignal = msg.monitors || {}
+        } catch (e) {}
+      }
+    }
+  }
+
+  onLiveChanged: if (!live) liveSignal = ({})
+
   // HDR auto-switching and VRR engagement are not announced as events.
   Timer {
-    interval: 3000
+    interval: root.live ? 1000 : 3000
     running: true
     repeat: true
     onTriggered: root.refresh()
@@ -141,4 +167,5 @@ Item {
   }
 
   Component.onCompleted: { refresh(); refreshCaps() }
+  Component.onDestruction: liveProc.running = false
 }

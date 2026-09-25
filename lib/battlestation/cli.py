@@ -11,7 +11,7 @@ import tomllib
 
 from . import PLUGIN_ID, __version__
 from . import config as config_mod
-from . import controller, doctor, drmprops, edid, fsutil, hypr, mangohud, pad, paths, scenes, steam, stream, sunshine, tailscale, tv
+from . import controller, doctor, drmprops, edid, fsutil, hypr, live, mangohud, pad, paths, scenes, steam, stream, sunshine, tailscale, tv
 
 
 def out(obj) -> None:
@@ -262,6 +262,10 @@ def cmd_fps_tail(args) -> int:
     return mangohud.main_tail()
 
 
+def cmd_live_tail(args) -> int:
+    return live.main_tail()
+
+
 def cmd_tv(args) -> int:
     cfg = _load_cfg()
     if not cfg.tv.configured:
@@ -475,6 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("pad-daemon", help="(internal) controller reader for the shell").set_defaults(func=cmd_pad_daemon)
     sub.add_parser("fps-tail", help="(internal) follow MangoHud logs").set_defaults(func=cmd_fps_tail)
+    sub.add_parser("live-tail", help="(internal) stream live HDR/VRR signal state").set_defaults(func=cmd_live_tail)
 
     t = sub.add_parser("tv", help="Samsung TV: pair, wake, input, status, key")
     t.add_argument("action", choices=["pair", "wake", "input", "status", "key"])

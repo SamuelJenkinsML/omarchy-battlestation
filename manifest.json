@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "Samuel Jenkins",
   "license": "MIT",
-  "description": "Gaming HUD for the bar (HDR, VRR, Hz, GPU temp/VRAM, Xbox controller battery, live FPS) plus display scenes that wake the TV and open Steam Big Picture from a controller chord.",
+  "description": "Gaming HUD for the bar (HDR, VRR, Hz, GPU temp/VRAM, Xbox controller battery, live FPS) with an in-game overlay, plus display scenes that wake the TV and open Steam Big Picture from a controller chord.",
   "kinds": [
     "service",
     "bar-widget"
@@ -18,7 +18,7 @@
     "displayName": "Battlestation",
     "description": "Display, GPU, controller and FPS status with scene switching",
     "category": "Hardware",
-    "aliases": ["gaming", "gpu", "hdr", "vrr", "fps", "controller", "scenes"],
+    "aliases": ["gaming", "gpu", "hdr", "vrr", "fps", "controller", "scenes", "overlay", "osd"],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
