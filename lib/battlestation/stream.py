@@ -14,7 +14,10 @@ config must never be able to leave the TV dark.
 
 Sunshine documents wlr capture of Hyprland virtual outputs; creating the output
 before Sunshine starts and resizing it from the prep-cmd is the approach the
-community settled on for it.
+community settled on for it. The parked output stays lit: with it switched off,
+a TV dropping off HDMI leaves Hyprland with no output at all, and coming back
+from that has frozen the display. Lit, XWayland lists it as a monitor, so the
+real display is kept XWayland's primary (the one Wine games open on).
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ import subprocess
 import time
 from contextlib import contextmanager
 
-from . import fsutil, hypr, luagen, paths, scenes, tailscale
+from . import fsutil, hypr, luagen, paths, scenes, tailscale, xwayland
 from .config import StreamConfig
 
 STAY_AWAKE = ("omarchy-toggle-idle", "stay-awake")
@@ -132,6 +135,27 @@ def encoder_sessions() -> int | None:
         return None
 
 
+FALLBACK = "FALLBACK"  # Hyprland's placeholder while it has no output: never a display to use
+
+
+def _primary_for(output: str, monitors: list[dict]) -> str | None:
+    """The real display XWayland should call primary: the focused one, else any that is on."""
+    real = [m for m in monitors if m.get("name") not in (output, FALLBACK) and not m.get("disabled")]
+    real.sort(key=lambda m: not m.get("focused"))
+    return str(real[0]["name"]) if real else None
+
+
+def _keep_primary_real(output: str, monitors: list[dict] | None = None) -> str | None:
+    """Keep Wine games off the parked output. Nothing to do with no real display on."""
+    try:
+        name = _primary_for(output, hypr.monitors() if monitors is None else monitors)
+    except hypr.HyprError:
+        return None
+    if name and xwayland.primary() != name:
+        xwayland.set_primary(name)
+    return name
+
+
 def _output(name: str, monitors: list[dict] | None = None) -> dict | None:
     for mon in hypr.monitors() if monitors is None else monitors:
         if mon.get("name") == name:
@@ -165,6 +189,11 @@ def _home_workspace(monitors: list[dict], output: str) -> int | None:
         if ws > 0:
             return ws
     return None
+
+
+def _active_workspace(monitors: list[dict]) -> int:
+    focused = next((m for m in monitors if m.get("focused") and not m.get("disabled")), None)
+    return int(((focused or {}).get("activeWorkspace") or {}).get("id") or 0)
 
 
 def _bring_windows_home(output: str, home_ws) -> None:
@@ -231,6 +260,7 @@ def arm(st: StreamConfig) -> dict:
             _detach_locked(state, reason)
             state = load_state()
 
+        before = hypr.monitors()
         _apply_overlay(luagen.render_stream(st.output, st.default_mode, st.scale))
         created = False
         if _output(st.output) is None:
@@ -249,11 +279,14 @@ def arm(st: StreamConfig) -> dict:
 
         try:
             mons = hypr.monitors()
-            home = _home_workspace(mons, st.output)
+            home = _home_workspace(before, st.output) or _home_workspace(mons, st.output)
             if home:
                 _park_workspace(st.output, home, mons)
+                if created and _active_workspace(mons) != home:
+                    hypr.focus_workspace(home)  # a new output takes focus from the one you were on
         except hypr.HyprError:
             pass
+        _keep_primary_real(st.output)
         state.update({"armed": True, "attached": False, "output": st.output, "parkedMode": st.default_mode,
                       "scale": st.scale, "unit": st.unit, "instance": hypr.instance_signature() or ""})
         save_state(state)
@@ -333,6 +366,7 @@ def _attach_locked(st: StreamConfig, mode: str) -> dict:
             hypr.focus_workspace(home_ws)
         except hypr.HyprError:
             pass
+    xwayland.set_primary(st.output)  # the only output on now, and the one games should open on
 
     set_idle = bool(st.idle_inhibit and not idle_was_set)
     if set_idle:
@@ -375,6 +409,7 @@ def _detach_locked(state: dict, reason: str, resumable: bool = False) -> dict:
     except (StreamError, hypr.HyprError):
         scenes.write_overlay(paths.stream_lua(), None)  # last resort: Hyprland reloads on the change by itself
     _bring_windows_home(output, state.get("homeWs"))
+    _keep_primary_real(output)
     if state.get("idleSetByUs"):
         _run_quiet(ALLOW_IDLE)
     hooks = [c for c in state.get("onDetach") or [] if isinstance(c, str)]
@@ -410,7 +445,8 @@ def settle() -> dict:
         output = state.get("output") or "BS-STREAM"
         moved = scenes.reclaim_from_virtual(output)
         scenes.recover_cursor(output, only_if_lost=not moved)
-        return {"settled": True, "moved": moved}
+        primary = _keep_primary_real(output)
+        return {"settled": True, "moved": moved, "primary": primary}
 
 
 # -- watchdog and status -------------------------------------------------------------

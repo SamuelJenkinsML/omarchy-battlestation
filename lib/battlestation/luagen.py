@@ -87,10 +87,14 @@ def render(scene_name: str, monitors: list[ResolvedMonitor], disabled: list[str]
 
 # -- stream overlay ----------------------------------------------------------------
 #
-# A second file that loads after the scene overlay. Parked, it only keeps the
-# virtual output out of the way. Attached, it also switches every physical
-# output off so the desktop moves onto the virtual one; Hyprland migrates the
-# workspaces by itself in both directions.
+# A second file that loads after the scene overlay. Parked, it keeps the
+# virtual output lit but out of the way: switched off, a TV dropping off HDMI
+# would leave Hyprland with no output at all, and coming back from its
+# placeholder output has frozen the display on NVIDIA. XWayland lists the lit
+# output too; xwayland.py keeps the real display primary so Wine games open
+# there. Attached, it also switches every physical output off so the desktop
+# moves onto the virtual one; Hyprland migrates the workspaces by itself in
+# both directions.
 
 PARK_POSITION = "20000x0"  # positive (XWayland cannot do negative) and not adjacent, so the pointer cannot wander in
 PARK_WORKSPACE = 99
