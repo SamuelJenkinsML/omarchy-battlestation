@@ -1,5 +1,6 @@
 # Streaming host: add this to ~/.config/battlestation/config.toml.
 # Then: battlestation setup stream, and flip the switch in the panel.
+# Away from home needs no config: see "Streaming away from home" in the README.
 
 [stream]
 default_mode = "1280x800@60"   # Steam Deck native; used when the client does not say

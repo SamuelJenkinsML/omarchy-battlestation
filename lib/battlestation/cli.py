@@ -11,7 +11,7 @@ import tomllib
 
 from . import PLUGIN_ID, __version__
 from . import config as config_mod
-from . import controller, doctor, drmprops, edid, fsutil, hypr, mangohud, pad, paths, scenes, steam, stream, sunshine, tv
+from . import controller, doctor, drmprops, edid, fsutil, hypr, mangohud, pad, paths, scenes, steam, stream, sunshine, tailscale, tv
 
 
 def out(obj) -> None:
@@ -310,6 +310,13 @@ def cmd_stream(args) -> int:
             st = None
         out({"ok": True, **stream.disarm(st)})
         return 0
+    if action == "remote-check":
+        out({"ok": True, **tailscale.check(args.peer)})
+        return 0
+    if action == "remote-off":
+        out({"ok": True, "remote": tailscale.set_running(False)})
+        notify("Away-from-home streaming off", "This machine has left the tailnet.", glyph="󰖂")
+        return 0
 
     cfg = _load_cfg()
     st = cfg.stream
@@ -323,6 +330,14 @@ def cmd_stream(args) -> int:
         result = stream.arm(st)
         notify("Streaming on", "Ready for Moonlight.", glyph="󰑈")
         out({"ok": True, **result})
+    elif action == "remote-on":
+        remote = tailscale.set_running(True)
+        armed = None
+        if not stream.is_enabled():  # reachable but with nothing to stream would be no use
+            stream.set_enabled(True)
+            armed = stream.arm(st)
+        notify("Away-from-home streaming on", f"Add {remote['name'] or remote['ip']} in Moonlight.", glyph="󰖂")
+        out({"ok": True, "remote": remote, "armed": armed})
     elif action == "arm":
         out({"ok": True, **stream.arm(st)})
     elif action == "disarm":
@@ -385,6 +400,8 @@ def cmd_setup_stream(args) -> int:
         print(f"{i}. {step['title']}\n   {step['why']}")
         for cmd in step["commands"]:
             print(f"     {cmd}")
+        if step.get("grant"):
+            print(f"     {step['grant']}")
         print()
     if missing:
         print(f"Sunshine config ({paths.sunshine_conf()}) still needs: {', '.join(missing)}")
@@ -392,6 +409,8 @@ def cmd_setup_stream(args) -> int:
     else:
         print("Sunshine config: ready." + (" (just written)" if written and written["changed"] else ""))
     print("\nThen: set a login at https://localhost:47990, switch streaming on in the panel, pair Moonlight.")
+    print("Pair at home first. Away from home: add this machine in Moonlight by its Tailscale name, and check the "
+          "link with `battlestation stream remote-check <deck>`.")
     return 0
 
 
@@ -465,10 +484,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("bigpicture", help="open Steam Big Picture").set_defaults(func=cmd_steam)
 
     st = sub.add_parser("stream", help="headless streaming host: on, off, status, detach")
-    st.add_argument("action", choices=["on", "off", "status", "detach", "arm", "disarm", "attach", "watchdog",
-                                        "settle"],
-                    help="on/off switch the feature; detach gives the desktop back; "
+    st.add_argument("action", choices=["on", "off", "status", "detach", "remote-on", "remote-off", "remote-check",
+                                       "arm", "disarm", "attach", "watchdog", "settle"],
+                    help="on/off switch the feature; detach gives the desktop back; remote-on/remote-off switch "
+                         "Tailscale, remote-check tests the link to a peer; "
                          "arm, disarm, attach, watchdog and settle are (internal)")
+    st.add_argument("peer", nargs="?", default="", help="remote-check: the Tailscale name of the other device")
     st.add_argument("--reason", default="")
     st.set_defaults(func=cmd_stream)
 
@@ -501,7 +522,7 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except config_mod.ConfigError as exc:
         return fail("config: " + "; ".join(exc.problems))
-    except (scenes.SceneError, hypr.HyprError, stream.StreamError) as exc:
+    except (scenes.SceneError, hypr.HyprError, stream.StreamError, tailscale.TailscaleError) as exc:
         return fail(str(exc))
     except BrokenPipeError:
         return 0

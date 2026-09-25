@@ -283,6 +283,18 @@ Panel {
             enabled: root.svc !== null && root.svc.streamPhase !== "working"
             onClicked: root.svc.streamToggle()
           }
+          Toggle {
+            visible: root.svc !== null && root.svc.streamAvailable && root.svc.remote.installed === true
+            width: parent.width
+            label: "Stream away from home"
+            description: root.remoteHint()
+            checked: root.svc !== null && root.svc.remoteOn
+            foreground: root.fg
+            accent: root.accent
+            fontFamily: root.fontFamily
+            enabled: root.svc !== null && root.svc.remoteAvailable && root.svc.streamPhase !== "working" && !root.svc.streamAttached
+            onClicked: root.svc.remoteToggle()
+          }
           Card {
             visible: root.svc !== null && root.svc.streamAvailable && root.svc.streamEnabled
             highlight: root.svc && root.svc.streamAttached ? root.accent : "transparent"
@@ -298,8 +310,9 @@ Panel {
             }
             KV {
               key: "Tailscale"
-              visible: root.svc !== null && !!root.svc.stream.tailscaleIp
-              value: root.svc ? (root.svc.stream.tailscaleIp || "") : ""
+              visible: root.svc !== null && root.svc.remoteOn
+              value: root.svc ? (root.svc.remote.name || root.svc.remote.ip || "") + (root.svc.remote.link ? " · " + root.svc.remote.link : "") : ""
+              valueColor: root.svc && root.svc.remote.link === "relayed" ? root.urgent : root.fg
             }
             Button {
               visible: root.svc !== null && root.svc.streamAttached
@@ -478,6 +491,16 @@ Panel {
     if (root.svc.streamAttached) return "Switching off now ends the running stream."
     if (root.svc.streamEnabled) return "Works with the TV off. Off stops Sunshine and closes its ports."
     return "Off: no virtual display, Sunshine stopped, nothing listening."
+  }
+
+  function remoteHint() {
+    if (!root.svc) return ""
+    var r = root.svc.remote
+    if (!r.available) return r.hint || ""
+    if (root.svc.streamAttached) return "Locked while a client is connected."
+    if (r.on) return r.link === "relayed" ? "Relayed link, too slow to stream: battlestation stream remote-check " + r.linkPeer
+                                          : "In Moonlight, add " + (r.name || r.ip) + ". Off leaves the tailnet."
+    return "Over Tailscale. Nothing is exposed to the internet." + (root.svc.streamEnabled ? "" : " Also switches streaming on.")
   }
 
   // ---------- small building blocks ----------
