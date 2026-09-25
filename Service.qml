@@ -43,6 +43,10 @@ Item {
   readonly property bool streamAvailable: stream.available === true
   readonly property bool streamEnabled: stream.enabled === true
   readonly property bool streamAttached: stream.attached === true
+  // Tailscale: whether it is on is tailscaled's state, so this follows `tailscale up|down` too.
+  readonly property var remote: stream.remote || ({})
+  readonly property bool remoteAvailable: remote.available === true
+  readonly property bool remoteOn: remote.on === true
   readonly property string streamPhase: streamProc.running && streamProc.label !== "" ? "working" : (stream.phase || "off")
 
   // ---- live hardware state ----
@@ -148,6 +152,15 @@ Item {
     }
     if (streamEnabled) runStream("switching off", ["off"])
     else runStream("switching on", ["on"])
+  }
+
+  function remoteToggle() {
+    if (!remoteAvailable) {
+      notify("Tailscale is not set up", remote.hint || "Run `battlestation setup stream`.", "normal", "󰖂")
+      return
+    }
+    if (remoteOn) runStream("leaving the tailnet", ["remote-off"])
+    else runStream("joining the tailnet", ["remote-on"])
   }
 
   // The panic button: gives the desktop back to the real displays.
@@ -426,6 +439,9 @@ Item {
     function streamOn(): void { if (!root.streamEnabled) root.streamToggle() }
     function streamOff(): void { if (root.streamEnabled) root.streamToggle() }
     function streamDetach(): void { root.streamDetach() }
+    function remoteToggle(): void { root.remoteToggle() }
+    function remoteOn(): void { if (!root.remoteOn) root.remoteToggle() }
+    function remoteOff(): void { if (root.remoteOn) root.remoteToggle() }
     function streamState(): string { return JSON.stringify(root.stream) }
     function refresh(): void { root.refreshState(); displayState.refresh(); displayState.refreshCaps(); gameWatcher.rescan() }
   }
