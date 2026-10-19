@@ -170,7 +170,7 @@ class ResolveTests(unittest.TestCase):
     def test_single_tv_hdr_auto_8bit(self):
         cfg = cfg_from(SINGLE)
         lua, res = scenes.render(cfg.scene("tv-desktop"), [TV], caps_for)
-        self.assertIn('output = "HDMI-A-1"', lua)
+        self.assertIn(f'output = "desc:{TV_DESC}"', lua)
         self.assertIn('mode = "3840x2160@60.00"', lua)
         self.assertIn("bitdepth = 8", lua)
         self.assertIn("supports_hdr = 1", lua)
@@ -189,15 +189,17 @@ class ResolveTests(unittest.TestCase):
         cfg = cfg_from(DESK_COUCH)
         lua, res = scenes.render(cfg.scene("couch"), [TV, UW], caps_for)
         self.assertIn('mode = "3840x2160@60.00"', lua)
-        self.assertIn('hl.monitor({ output = "DP-1", disabled = true })', lua)
+        self.assertIn(f'hl.monitor({{ output = "desc:{UW_DESC}", disabled = true }})', lua)
         self.assertIn("vrr = 3 }", lua.replace("vrr = 3,", "vrr = 3 }"))
         self.assertTrue(any("fallback" in n for n in res.notes))
 
     def test_desk(self):
         cfg = cfg_from(DESK_COUCH)
         lua, _ = scenes.render(cfg.scene("desk"), [TV, UW], caps_for)
-        self.assertIn('output = "DP-1", mode = "3440x1440@165.00"', lua)
-        self.assertIn('hl.monitor({ output = "HDMI-A-1", disabled = true })', lua)
+        self.assertIn(f'output = "desc:{UW_DESC}", mode = "3440x1440@165.00"', lua)
+        self.assertIn(f'hl.monitor({{ output = "desc:{TV_DESC}", disabled = true }})', lua)
+        self.assertNotIn('"DP-1"', lua)
+        self.assertNotIn('"HDMI-A-1"', lua)
         self.assertIn("cm_auto_hdr = 0", lua)
 
     def test_pick_auto_prefers_most_specific(self):
@@ -207,6 +209,11 @@ monitors = [{{ match = "desc:{UW_DESC}" }}, {{ match = "desc:{TV_DESC}", positio
 """)
         self.assertEqual(scenes.pick_auto(cfg, [TV, UW]), "both")
         self.assertEqual(scenes.pick_auto(cfg, [TV]), "couch")
+
+    def test_rules_fall_back_to_the_connector_without_a_description(self):
+        bare = dict(TV, description="")
+        lua, _ = scenes.render(cfg_from(DESK_COUCH).scene("desk"), [UW, bare], caps_for)
+        self.assertIn('hl.monitor({ output = "HDMI-A-1", disabled = true })', lua)
 
     def test_never_disable_everything(self):
         cfg = cfg_from(DESK_COUCH)
@@ -270,6 +277,26 @@ class ApplyTests(unittest.TestCase):
         result = scenes.revert_if_due(now=state["pendingRevert"]["deadline"] + 1)
         self.assertTrue(result["reverted"])
         self.assertFalse(paths.scene_lua().exists())
+
+    def test_ensure_lights_a_connected_screen(self):
+        from battlestation import paths
+        other = mon("HDMI-A-1", "Generic 1080p Monitor", 1920, 1080, 60.0, ["1920x1080@60.00Hz"])
+        dark = lambda m: dict(m, disabled=True)  # noqa: E731
+        cfg = cfg_from(DESK_COUCH)
+        for monitors, action, active in [
+            ([], None, "couch"),
+            ([TV], None, "couch"),
+            ([dark(UW)], "apply", "desk"),
+            ([dark(other)], "clear", ""),
+        ]:
+            with self.subTest(monitors=[m["description"] for m in monitors]):
+                mock.patch("battlestation.hypr.monitors", return_value=[TV]).start()
+                scenes.apply(cfg, "couch", confirm=False)
+                mock.patch("battlestation.hypr.monitors", return_value=monitors).start()
+                result = scenes.ensure(cfg)
+                self.assertEqual(result.get("action"), action)
+                self.assertEqual(scenes.load_state()["active"], active)
+                self.assertEqual(paths.scene_lua().exists(), action != "clear")
 
     def test_config_error_rolls_back(self):
         from battlestation import paths

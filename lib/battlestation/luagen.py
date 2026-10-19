@@ -17,6 +17,7 @@ from .hypr import lua_str
 class ResolvedMonitor:
     connector: str
     mode: str
+    selector: str = ""
     position: str = "auto"
     scale: float = 1.0
     transform: int = 0
@@ -36,7 +37,7 @@ def _num(n: float) -> str:
 
 def monitor_line(m: ResolvedMonitor) -> str:
     fields = [
-        f"output = {lua_str(m.connector)}",
+        f"output = {lua_str(m.selector or m.connector)}",
         f"mode = {lua_str(m.mode)}",
         f"position = {lua_str(m.position)}",
         f"scale = {_num(m.scale)}",

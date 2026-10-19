@@ -211,6 +211,14 @@ def cmd_scene_auto(args) -> int:
     return 0
 
 
+def cmd_scene_ensure(args) -> int:
+    if stream.load_state().get("attached"):
+        out({"ok": True, "changed": False, "skipped": "streaming"})
+        return 0
+    out({"ok": True, **scenes.ensure(_load_cfg())})
+    return 0
+
+
 def cmd_scene_keep(args) -> int:
     out({"ok": True, **scenes.keep()})
     return 0
@@ -472,6 +480,7 @@ def build_parser() -> argparse.ArgumentParser:
     au = sc.add_parser("auto", help="apply the most specific scene whose monitors are all connected")
     au.add_argument("--force", action="store_true")
     au.set_defaults(func=cmd_scene_auto)
+    sc.add_parser("ensure", help="(internal) light a connected screen if the active scene leaves all of them off").set_defaults(func=cmd_scene_ensure)
     sc.add_parser("keep").set_defaults(func=cmd_scene_keep)
     sc.add_parser("revert").set_defaults(func=cmd_scene_revert)
     sc.add_parser("revert-if-due").set_defaults(func=cmd_scene_revert_if_due)

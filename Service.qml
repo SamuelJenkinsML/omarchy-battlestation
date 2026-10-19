@@ -352,8 +352,9 @@ Item {
     onOutputsChanged: if (root.streamEnabled && !root.streamAttached) settleDebounce.restart()
     onTopologyChanged: {
       // Attaching a stream switches the displays off, which is not a hotplug.
-      if (root.sceneState.autoSceneOnHotplug && !root.pendingRevert && !root.busy && !root.streamAttached)
-        root.run("Matching scene", ["scene", "auto"])
+      if (root.pendingRevert || root.busy || root.streamAttached) return
+      if (root.sceneState.autoSceneOnHotplug) root.run("Matching scene", ["scene", "auto"])
+      else root.run("Lighting a screen", ["scene", "ensure"])
     }
   }
 
@@ -480,6 +481,7 @@ Item {
 
   Component.onCompleted: {
     refreshState()
+    run("Lighting a screen", ["scene", "ensure"])
     runStream("", ["arm"])  // no-op unless streaming is switched on; never ends a live stream
   }
 }

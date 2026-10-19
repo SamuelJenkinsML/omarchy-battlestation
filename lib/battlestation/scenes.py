@@ -57,6 +57,14 @@ def find_monitor(rule_match: str, monitors: list[dict]) -> dict | None:
     return None
 
 
+def selector(mon: dict) -> str:
+    """Rules follow the screen, not the port: a connector-name rule written
+    for the TV would push its 4K mode onto any panel plugged into that port
+    later, and a disabled one would leave that panel dark."""
+    desc = str(mon.get("description") or "").strip()
+    return f"desc:{desc}" if desc else str(mon.get("name") or "")
+
+
 def _pick_mode(rule: MonitorRule, mon: dict, notes: list[str]) -> str:
     if rule.mode in ("preferred", "highres", "highrr"):
         return rule.mode
@@ -109,6 +117,7 @@ def resolve(scene: Scene, monitors: list[dict], caps_for=edid.read_caps) -> Reso
             luagen.ResolvedMonitor(
                 connector=connector,
                 mode=mode,
+                selector=selector(mon),
                 position=rule.position,
                 scale=rule.scale,
                 transform=rule.transform,
@@ -125,7 +134,7 @@ def resolve(scene: Scene, monitors: list[dict], caps_for=edid.read_caps) -> Reso
         for mon in monitors:
             name = str(mon.get("name") or "")
             if name and name not in matched and hypr.CONNECTOR_RE.match(name):
-                res.disabled.append(name)
+                res.disabled.append(selector(mon))
     if not res.monitors:
         raise SceneError(
             f"scene '{scene.name}' matches none of the connected monitors "
@@ -331,6 +340,25 @@ def pick_auto(cfg: Config, monitors: list[dict]) -> str | None:
             if best is None or len(scene.monitors) > best[0]:
                 best = (len(scene.monitors), scene.name)
     return best[1] if best else None
+
+
+def ensure(cfg: Config, monitors: list[dict] | None = None) -> dict:
+    """Never leave a connected screen dark because the active scene was written
+    for screens that are not plugged in. Runs at startup and on every hotplug,
+    whether or not auto_scene_on_hotplug is set.
+
+    Acts only when real screens are connected but none is lit: a screen in
+    standby (nothing connected) is left alone, so TV dropouts do not churn
+    the layout. Switches to the best matching scene, or drops the overlay so
+    monitors.lua lights whatever is there.
+    """
+    mons = real_monitors(cfg, monitors)
+    if not mons or any(not m.get("disabled") for m in mons):
+        return {"changed": False}
+    name = pick_auto(cfg, mons)
+    if name:
+        return {"changed": True, "action": "apply", **apply(cfg, name, confirm=False)}
+    return {"changed": True, "action": "clear", **clear()}
 
 
 def keep() -> dict:
