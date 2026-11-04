@@ -283,15 +283,17 @@ class ApplyTests(unittest.TestCase):
         other = mon("HDMI-A-1", "Generic 1080p Monitor", 1920, 1080, 60.0, ["1920x1080@60.00Hz"])
         dark = lambda m: dict(m, disabled=True)  # noqa: E731
         cfg = cfg_from(DESK_COUCH)
-        for monitors, action, active in [
-            ([], None, "couch"),
-            ([TV], None, "couch"),
-            ([dark(UW)], "apply", "desk"),
-            ([dark(other)], "clear", ""),
+        for start, monitors, action, active in [
+            ("couch", [], None, "couch"),
+            ("couch", [TV], None, "couch"),
+            ("couch", [dark(UW)], "apply", "desk"),
+            ("couch", [dark(other)], "clear", ""),
+            ("desk", [TV], "apply", "couch"),
+            ("desk", [other], "clear", ""),
         ]:
-            with self.subTest(monitors=[m["description"] for m in monitors]):
-                mock.patch("battlestation.hypr.monitors", return_value=[TV]).start()
-                scenes.apply(cfg, "couch", confirm=False)
+            with self.subTest(start=start, monitors=[m["description"] for m in monitors]):
+                mock.patch("battlestation.hypr.monitors", return_value=[TV, UW]).start()
+                scenes.apply(cfg, start, confirm=False)
                 mock.patch("battlestation.hypr.monitors", return_value=monitors).start()
                 result = scenes.ensure(cfg)
                 self.assertEqual(result.get("action"), action)

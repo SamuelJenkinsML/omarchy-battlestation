@@ -343,17 +343,22 @@ def pick_auto(cfg: Config, monitors: list[dict]) -> str | None:
 
 
 def ensure(cfg: Config, monitors: list[dict] | None = None) -> dict:
-    """Never leave a connected screen dark because the active scene was written
-    for screens that are not plugged in. Runs at startup and on every hotplug,
-    whether or not auto_scene_on_hotplug is set.
+    """Never leave a connected screen dark, or lit only by monitors.lua,
+    because the active scene was written for screens that are not plugged in.
+    Runs at startup and on every hotplug, whether or not auto_scene_on_hotplug
+    is set.
 
-    Acts only when real screens are connected but none is lit: a screen in
-    standby (nothing connected) is left alone, so TV dropouts do not churn
-    the layout. Switches to the best matching scene, or drops the overlay so
-    monitors.lua lights whatever is there.
+    Acts only when real screens are connected and either none is lit or the
+    active scene targets none of them: a screen in standby (nothing connected)
+    is left alone, so TV dropouts do not churn the layout. Switches to the best
+    matching scene, or drops the overlay so monitors.lua lights whatever is there.
     """
     mons = real_monitors(cfg, monitors)
-    if not mons or any(not m.get("disabled") for m in mons):
+    if not mons:
+        return {"changed": False}
+    scene = cfg.scenes.get(load_state().get("active") or "")
+    stale = bool(scene and scene.monitors) and not any(find_monitor(r.match, mons) for r in scene.monitors)
+    if not stale and any(not m.get("disabled") for m in mons):
         return {"changed": False}
     name = pick_auto(cfg, mons)
     if name:
