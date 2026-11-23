@@ -8,7 +8,7 @@ QMLLINT ?= /usr/lib/qt6/bin/qmllint
 # directory. The shell hot-reloads plugin code on save.
 dev:
 	mkdir -p $(DEST)
-	rsync -a --delete --exclude .git --exclude tests --exclude '__pycache__' --exclude '*.pyc' ./ $(DEST)/
+	rsync -a --delete --exclude .git --exclude .agents --exclude AGENTS.md --exclude tests --exclude '__pycache__' --exclude '*.pyc' ./ $(DEST)/
 	@echo "synced to $(DEST)"
 
 test:
