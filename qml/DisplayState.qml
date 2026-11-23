@@ -18,11 +18,24 @@ Item {
   property bool live: false
   property var liveSignal: ({})   // connector -> {vrrEnabled, hdrMetadata, colorspace, maxBpc}
 
+  property int hotplugSeq: 0
+  property int handledHotplugSeq: 0
+
   signal topologyChanged()
   signal outputsChanged()
 
+  function topologyKey(list) {
+    return list.map(function(m) {
+      var modes = m.availableModes ? m.availableModes.join(";") : ""
+      return (m.name || "") + ":" + !!m.disabled + ":" + (m.description || "") + ":" + modes
+    }).join("|")
+  }
+
   function refresh() {
-    if (!monProc.running) monProc.running = true
+    if (!monProc.running) {
+      monProc.seenSeq = root.hotplugSeq
+      monProc.running = true
+    }
   }
 
   function refreshCaps() {
@@ -90,16 +103,19 @@ Item {
 
   Process {
     id: monProc
+    property int seenSeq: 0
     command: ["hyprctl", "monitors", "all", "-j"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         try {
           var parsed = JSON.parse(text)
-          var before = root.monitors.map(function(m) { return m.name + ":" + m.disabled }).join(",")
+          var before = root.topologyKey(root.monitors)
           root.monitors = parsed
-          var after = parsed.map(function(m) { return m.name + ":" + m.disabled }).join(",")
-          if (before !== after) {
+          var after = root.topologyKey(parsed)
+          var hotplug = monProc.seenSeq > root.handledHotplugSeq
+          if (hotplug) root.handledHotplugSeq = monProc.seenSeq
+          if (before !== after || hotplug) {
             root.refreshCaps()
             root.topologyChanged()
           }
@@ -157,9 +173,12 @@ Item {
     function onRawEvent(event) {
       var n = String(event && event.name ? event.name : "")
       // Not folded into topologyChanged: a TV that drops out and back within
-      // the debounce leaves the same topology, but its workspaces have moved.
-      if (n === "monitoradded" || n === "monitoraddedv2" || n === "monitorremoved" || n === "monitorremovedv2")
+      // the debounce leaves the same topology, but its workspaces have moved
+      // and its EDID/modes (e.g. HDMI 2.1 FRL renegotiation) may have changed.
+      if (n === "monitoradded" || n === "monitoraddedv2" || n === "monitorremoved" || n === "monitorremovedv2") {
+        root.hotplugSeq += 1
         root.outputsChanged()
+      }
       if (n === "monitoradded" || n === "monitorremoved" || n === "monitoraddedv2"
           || n === "monitorremovedv2" || n === "configreloaded" || n === "fullscreen")
         debounce.restart()

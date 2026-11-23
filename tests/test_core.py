@@ -52,6 +52,11 @@ class EdidTests(unittest.TestCase):
         self.assertFalse(c.vrr_hint)
         self.assertEqual(c.deep_color_bpc, 12)
 
+    def test_samsung_s90d_hdmi21(self):
+        c = edid.parse((FIXTURES / "samsung-s90d-hdmi21.edid").read_bytes())
+        self.assertEqual((c.max_tmds_mhz, c.max_frl_gbps, c.vrr_min, c.vrr_max), (600, 48, 48, 144))
+        self.assertEqual(edid.max_bpc_for_mode(c, 3840, 2160, 120), 10)
+
     def test_link_budget(self):
         c = tv_caps("HDMI-A-1")
         self.assertEqual(edid.max_bpc_for_mode(c, 3840, 2160, 60), 8)
@@ -299,6 +304,90 @@ class ApplyTests(unittest.TestCase):
                 self.assertEqual(result.get("action"), action)
                 self.assertEqual(scenes.load_state()["active"], active)
                 self.assertEqual(paths.scene_lua().exists(), action != "clear")
+
+    def test_ensure_upgrades_active_scene_after_hdmi21_renegotiation(self):
+        from battlestation import paths
+        s90d_caps = edid.parse((FIXTURES / "samsung-s90d-hdmi21.edid").read_bytes())
+        tv_120 = mon("HDMI-A-1", TV_DESC, 3840, 2160, 60.0,
+                     ["3840x2160@60.00Hz", "3840x2160@119.88Hz", "3840x2160@143.99Hz"])
+        cfg = cfg_from(DESK_COUCH + f"""
+[scene.couch-gaming]
+disable_unlisted = true
+steam = "bigpicture"
+monitors = [{{ match = "desc:{TV_DESC}", mode = "3840x2160@120", fallback_modes = ["3840x2160@60"], vrr = 3, hdr = "auto" }}]
+""")
+        # First connect only offers 60 Hz, so the scene falls back to 60.00.
+        mock.patch("battlestation.hypr.monitors", return_value=[TV]).start()
+        mock.patch("battlestation.scenes.edid.read_caps", return_value=s90d_caps).start()
+        scenes.apply(cfg, "couch-gaming", confirm=False)
+        self.assertIn('mode = "3840x2160@60.00"', paths.scene_lua().read_text())
+
+        # TV renegotiates HDMI 2.1 and now advertises 119.88 Hz: ensure upgrades
+        # in place without switching away from couch-gaming.
+        mock.patch("battlestation.hypr.monitors", return_value=[tv_120]).start()
+        result = scenes.ensure(cfg)
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["action"], "apply")
+        self.assertEqual(scenes.load_state()["active"], "couch-gaming")
+        self.assertIn('mode = "3840x2160@119.88"', paths.scene_lua().read_text())
+        self.assertIn("bitdepth = 10", paths.scene_lua().read_text())
+
+        # Once upgraded, another ensure is a no-op (no extra Hyprland reload).
+        reloads = self.reload.call_count
+        self.assertFalse(scenes.ensure(cfg)["changed"])
+        self.assertEqual(self.reload.call_count, reloads)
+
+    def test_ensure_skips_downgrade_on_transient_unreadable_edid(self):
+        from battlestation import paths
+        cfg = cfg_from(DESK_COUCH)
+        mock.patch("battlestation.hypr.monitors", return_value=[TV]).start()
+        scenes.apply(cfg, "couch", confirm=False)
+        before = paths.scene_lua().read_text()
+        self.assertIn("supports_hdr = 1", before)
+
+        # Transient kernel EDID read failure must not strip HDR from the live scene.
+        mock.patch("battlestation.scenes.edid.read_caps", return_value=edid.EdidCaps()).start()
+        reloads = self.reload.call_count
+        self.assertFalse(scenes.ensure(cfg)["changed"])
+        self.assertEqual(self.reload.call_count, reloads)
+        self.assertEqual(paths.scene_lua().read_text(), before)
+
+    def test_ensure_does_not_churn_when_unlisted_display_connects_or_overlay_deleted(self):
+        from battlestation import paths
+        cfg = cfg_from(DESK_COUCH)
+        mock.patch("battlestation.hypr.monitors", return_value=[TV]).start()
+        scenes.apply(cfg, "couch", confirm=False)
+
+        # Plugging in the ultrawide while couch is active must not reload to blank it.
+        mock.patch("battlestation.hypr.monitors", return_value=[TV, UW]).start()
+        reloads = self.reload.call_count
+        self.assertFalse(scenes.ensure(cfg)["changed"])
+        self.assertEqual(self.reload.call_count, reloads)
+
+        # Manually deleting battlestation-scene.lua lets monitors.lua take over.
+        paths.scene_lua().unlink()
+        self.assertFalse(scenes.ensure(cfg)["changed"])
+        self.assertFalse(paths.scene_lua().exists())
+
+    def test_scene_enter_skips_tv_wake_when_tv_already_connected(self):
+        from battlestation import cli
+        cfg = cfg_from(f"""
+[tv]
+host = "192.168.1.133"
+mac = "aa:bb:cc:dd:ee:ff"
+[scene.couch]
+wake_tv = true
+monitors = [{{ match = "desc:{TV_DESC}", mode = "3840x2160@60" }}]
+""")
+        args = mock.Mock(name="couch", no_confirm=True)
+        args.name = "couch"
+        with mock.patch("battlestation.cli._load_cfg", return_value=cfg), \
+                mock.patch("battlestation.cli.tv.wake", side_effect=AssertionError("should not wake")), \
+                mock.patch("battlestation.cli.out") as emit:
+            self.assertEqual(cli.cmd_scene_enter(args), 0)
+        payload = emit.call_args.args[0]
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["steps"][0]["skipped"], "display already connected")
 
     def test_config_error_rolls_back(self):
         from battlestation import paths

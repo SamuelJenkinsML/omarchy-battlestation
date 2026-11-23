@@ -133,6 +133,25 @@ def _run_hooks(commands: list[str], label: str) -> list[dict]:
     return results
 
 
+def _tv_monitor_present(scene) -> bool:
+    """True when the TV display for this scene is already connected on the bus.
+
+    Avoids blocking on (or failing from) Wake-on-LAN / REST polling when the TV
+    is already awake and connected — e.g. switching tv-desktop <-> tv-gaming or
+    when the TV's Wi-Fi IP has drifted.
+    """
+    if not scene.monitors:
+        return False
+    try:
+        mons = hypr.monitors()
+    except hypr.HyprError:
+        return False
+    matched = [m for rule in scene.monitors if (m := scenes.find_monitor(rule.match, mons))]
+    if len(matched) == len(scene.monitors):
+        return True
+    return any(str(m.get("name") or "").startswith("HDMI") for m in matched)
+
+
 def _wait_for_monitor(scene, timeout: float) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -158,15 +177,18 @@ def cmd_scene_enter(args) -> int:
         steps += _run_hooks(cfg.scenes[previous].on_exit, f"{previous}.on_exit")
 
     if scene.wake_tv:
-        try:
-            woke = tv.wake(cfg.tv)
-            steps.append({"step": "tv-wake", **woke})
-        except tv.TvError as exc:
-            notify("TV did not wake", str(exc), "critical", "󰔂")
-            return fail(f"tv wake: {exc}")
-        if not _wait_for_monitor(scene, cfg.tv.wake_timeout_s):
-            notify("TV is on but no display appeared", "Check the TV input and cable.", "critical", "󰔂")
-            return fail("scene monitor never appeared after waking the TV")
+        if _tv_monitor_present(scene):
+            steps.append({"step": "tv-wake", "state": "on", "woke": False, "skipped": "display already connected"})
+        else:
+            try:
+                woke = tv.wake(cfg.tv)
+                steps.append({"step": "tv-wake", **woke})
+            except tv.TvError as exc:
+                notify("TV did not wake", str(exc), "critical", "󰔂")
+                return fail(f"tv wake: {exc}")
+            if not _wait_for_monitor(scene, cfg.tv.wake_timeout_s):
+                notify("TV is on but no display appeared", "Check the TV input and cable.", "critical", "󰔂")
+                return fail("scene monitor never appeared after waking the TV")
 
     applied = scenes.apply(cfg, scene.name, confirm=not args.no_confirm)
     steps.append({"step": "layout", **applied})

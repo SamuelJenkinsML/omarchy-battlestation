@@ -32,6 +32,7 @@ Item {
   property int revertRemaining: 0
   property bool busy: false
   property string busyLabel: ""
+  property bool pendingTopologyCheck: false
   property string lastError: ""
   property bool launchedBigPicture: false
   property int bigPictureReturnId: 0
@@ -222,7 +223,28 @@ Item {
       root.busy = false
       root.busyLabel = ""
       root.refreshState()
+      if (root.pendingTopologyCheck) {
+        root.pendingTopologyCheck = false
+        topologyRetry.restart()
+      }
     }
+  }
+
+  Timer {
+    id: topologyRetry
+    interval: 250
+    onTriggered: root.handleTopologyChange()
+  }
+
+  function handleTopologyChange() {
+    // Attaching a stream switches the displays off, which is not a hotplug.
+    if (root.pendingRevert || root.streamAttached) return
+    if (root.busy) {
+      root.pendingTopologyCheck = true
+      return
+    }
+    if (root.sceneState.autoSceneOnHotplug) root.run("Matching scene", ["scene", "auto"])
+    else root.run("Lighting a screen", ["scene", "ensure"])
   }
 
   function run(label, args) {
@@ -350,12 +372,7 @@ Item {
     id: displayState
     cli: root.cli
     onOutputsChanged: if (root.streamEnabled && !root.streamAttached) settleDebounce.restart()
-    onTopologyChanged: {
-      // Attaching a stream switches the displays off, which is not a hotplug.
-      if (root.pendingRevert || root.busy || root.streamAttached) return
-      if (root.sceneState.autoSceneOnHotplug) root.run("Matching scene", ["scene", "auto"])
-      else root.run("Lighting a screen", ["scene", "ensure"])
-    }
+    onTopologyChanged: root.handleTopologyChange()
   }
 
   ControllerState {

@@ -109,11 +109,11 @@ def _parse_cta(block: bytes, caps: EdidCaps) -> None:
                 caps.is_hdmi = True
                 if len(p) >= 5 and p[4]:
                     caps.max_tmds_mhz = p[4] * 5
-                if len(p) >= 8:
-                    caps.max_frl_gbps = _FRL_GBPS.get(p[7] >> 4, 0)
-                if len(p) >= 11:
-                    vmin = p[9] & 0x3F
-                    vmax = ((p[9] & 0xC0) << 2) | p[10]
+                if len(p) >= 7:
+                    caps.max_frl_gbps = _FRL_GBPS.get(p[6] >> 4, 0)
+                if len(p) >= 10:
+                    vmin = p[8] & 0x3F
+                    vmax = ((p[8] & 0xC0) << 2) | p[9]
                     if vmax:
                         caps.vrr_min, caps.vrr_max = vmin, vmax
             elif oui == OUI_AMD_FREESYNC:

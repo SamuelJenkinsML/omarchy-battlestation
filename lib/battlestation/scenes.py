@@ -87,7 +87,8 @@ def _mode_dims(mode: str, mon: dict) -> tuple[int, int, float]:
     return int(mon.get("width") or 1920), int(mon.get("height") or 1080), float(mon.get("refreshRate") or 60)
 
 
-def resolve(scene: Scene, monitors: list[dict], caps_for=edid.read_caps) -> Resolution:
+def resolve(scene: Scene, monitors: list[dict], caps_for=None) -> Resolution:
+    caps_for = caps_for or edid.read_caps
     res = Resolution(scene=scene.name)
     matched: set[str] = set()
     for rule in scene.monitors:
@@ -143,7 +144,7 @@ def resolve(scene: Scene, monitors: list[dict], caps_for=edid.read_caps) -> Reso
     return res
 
 
-def render(scene: Scene, monitors: list[dict], caps_for=edid.read_caps) -> tuple[str, Resolution]:
+def render(scene: Scene, monitors: list[dict], caps_for=None) -> tuple[str, Resolution]:
     res = resolve(scene, monitors, caps_for)
     return luagen.render(scene.name, res.monitors, res.disabled), res
 
@@ -156,6 +157,20 @@ def layout_body(text: str | None) -> str | None:
     if text is None:
         return None
     return "\n".join(line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("--"))
+
+
+def active_layout_body(text: str | None) -> str | None:
+    """Non-comment scene Lua minus disabled-monitor lines.
+
+    Lets ensure() detect when an already-active scene would now render a
+    better or newly-connected live output rule (e.g. a TV finished HDMI 2.1
+    renegotiation and now offers 120 Hz instead of its 60 Hz fallback) without
+    reloading just because an unlisted display was plugged in or removed.
+    """
+    body = layout_body(text)
+    if body is None:
+        return None
+    return "\n".join(line for line in body.splitlines() if "disabled = true" not in line)
 
 
 def write_overlay(target, text: str | None) -> None:
@@ -342,16 +357,53 @@ def pick_auto(cfg: Config, monitors: list[dict]) -> str | None:
     return best[1] if best else None
 
 
+def _active_scene_outdated(scene: Scene | None, mons: list[dict], caps_for=None) -> bool:
+    caps_for = caps_for or edid.read_caps
+    if not scene or not scene.monitors:
+        return False
+    existing = fsutil.read_text(paths.scene_lua())
+    if existing is None:
+        return False  # user cleared or deleted the overlay; let monitors.lua own it
+    caps_cache: dict[str, edid.EdidCaps] = {}
+
+    def cached_caps(connector: str) -> edid.EdidCaps:
+        if connector not in caps_cache:
+            caps_cache[connector] = caps_for(connector)
+        return caps_cache[connector]
+
+    try:
+        rendered, res = render(scene, mons, cached_caps)
+    except SceneError:
+        return False
+    if active_layout_body(existing) == active_layout_body(rendered):
+        return False
+    # Do not downgrade an already-configured output during a transient EDID
+    # read failure (nvidia-modeset occasionally returns an empty EDID right as
+    # an HDMI display wakes).
+    empty = edid.EdidCaps()
+    for m in res.monitors:
+        if caps_cache.get(m.connector) == empty and hypr.lua_str(m.selector or m.connector) in existing:
+            return False
+    return True
+
+
 def ensure(cfg: Config, monitors: list[dict] | None = None) -> dict:
     """Never leave a connected screen dark, or lit only by monitors.lua,
-    because the active scene was written for screens that are not plugged in.
-    Runs at startup and on every hotplug, whether or not auto_scene_on_hotplug
-    is set.
+    because the active scene was written for screens that are not plugged in,
+    or pinned to a fallback mode from a transient EDID on wake. Runs at
+    startup and on every hotplug, whether or not auto_scene_on_hotplug is set.
 
-    Acts only when real screens are connected and either none is lit or the
-    active scene targets none of them: a screen in standby (nothing connected)
-    is left alone, so TV dropouts do not churn the layout. Switches to the best
-    matching scene, or drops the overlay so monitors.lua lights whatever is there.
+    Acts when real screens are connected and either:
+    - none is lit, or the active scene targets none of them (switches to the
+      best matching scene, or drops the overlay so monitors.lua lights
+      whatever is there); or
+    - the active scene's live output rules would now render differently (for
+      example, an HDMI 2.1 TV finished renegotiating and now offers 120 Hz
+      instead of the 60 Hz fallback, or another monitor listed by the active
+      scene connected), re-applying the active scene in place.
+
+    A screen in standby (nothing connected) is left alone, so TV dropouts do
+    not churn the layout.
     """
     mons = real_monitors(cfg, monitors)
     if not mons:
@@ -359,6 +411,8 @@ def ensure(cfg: Config, monitors: list[dict] | None = None) -> dict:
     scene = cfg.scenes.get(load_state().get("active") or "")
     stale = bool(scene and scene.monitors) and not any(find_monitor(r.match, mons) for r in scene.monitors)
     if not stale and any(not m.get("disabled") for m in mons):
+        if scene and _active_scene_outdated(scene, mons, edid.read_caps):
+            return {"changed": True, "action": "apply", **apply(cfg, scene.name, confirm=False)}
         return {"changed": False}
     name = pick_auto(cfg, mons)
     if name:
@@ -413,7 +467,8 @@ def clear() -> dict:
 # -- capture / init ------------------------------------------------------------------
 
 
-def capture_rules(monitors: list[dict], caps_for=edid.read_caps, drm=None) -> list[MonitorRule]:
+def capture_rules(monitors: list[dict], caps_for=None, drm=None) -> list[MonitorRule]:
+    caps_for = caps_for or edid.read_caps
     drm = drm or {}
     rules = []
     for mon in monitors:
